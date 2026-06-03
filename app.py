@@ -1,3 +1,19 @@
+#!/usr/bin/env python3
+"""
+CapitalPay Checkout — TT CAMS (tcamsBankTest — Account 46, TZS)
+================================================================
+SQLite DB (capitalpay.db) created automatically in the same directory.
+  • invoices       — written at invoice creation; holds signing fields for hash validation
+  • notifications  — written when /notify receives a webhook event
+  • capitalpay_ips — tracks every IP that POSTs to /notify
+
+Routes:
+  /           — Checkout form
+  /monitor    — Live payment monitor (opens in new tab)
+  /notify     — Webhook endpoint (set as notification_url)
+  /go/<id>    — Hosted checkout redirect (opens in new tab)
+"""
+
 import os
 import queue
 import re
@@ -20,16 +36,16 @@ import requests
 from flask import Flask, Response, jsonify, render_template_string, request
 
 # ─── Credentials (tcamsBankTest — Account 46, TZS) ────────────────────────────
-BASE_URL = "https://app.capitalpay.co.tz/api"
+BASE_URL     = "https://app.capitalpay.co.tz/api"
 CHECKOUT_URL = "https://app.capitalpay.co.tz/PaymentAPI/invoice/checkout"
 
 ACCOUNT_ID = 46
-API_KEY = "tmlLFcEcOy+e6ihv"
+API_KEY    = "tmlLFcEcOy+e6ihv"
 API_SECRET = "Txe/Gd97FaH9jsuqrDsr9jaKuJhVm0A/"
-CURRENCY = "TZS"
+CURRENCY   = "TZS"
 
-LOCAL_PORT = int(os.environ.get("PORT", 5055))
-HOST = os.environ.get("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{LOCAL_PORT}")
+LOCAL_PORT  = int(os.environ.get("PORT", 5055))
+HOST        = os.environ.get("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{LOCAL_PORT}")
 PUBLIC_HOST = "https://app.capitalpay.co.tz"
 PRIVATE_HOSTS = (
     "https://192.168.92.110",
@@ -51,14 +67,13 @@ LOG_QUEUE: queue.Queue = queue.Queue(maxsize=500)
 
 class _TeeLogger:
     """Writes to the real stdout AND pushes each line into LOG_QUEUE."""
-
     def __init__(self, real):
         self._real = real
 
     def write(self, msg: str):
         self._real.write(msg)
         if msg.strip():
-            ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            ts  = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             line = f"{ts}  {msg.rstrip()}"
             if LOG_QUEUE.full():
                 try:
@@ -88,6 +103,7 @@ def get_log_lines() -> list[str]:
 
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET", "cp-logs-secret-2026")
 _checkout_forms: dict[str, dict[str, str]] = {}
 
 
@@ -100,7 +116,6 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
-
 @contextmanager
 def get_db():
     conn = _get_conn()
@@ -112,7 +127,6 @@ def get_db():
         raise
     finally:
         conn.close()
-
 
 def init_db() -> None:
     with get_db() as db:
@@ -172,8 +186,8 @@ def init_db() -> None:
 # ─── Invoice store ─────────────────────────────────────────────────────────────
 
 def save_invoice_meta(
-        *, client_invoice_ref, invoice_number, amount,
-        name, id_number, desc, msisdn, email, secure_hash,
+    *, client_invoice_ref, invoice_number, amount,
+    name, id_number, desc, msisdn, email, secure_hash,
 ) -> None:
     with get_db() as db:
         db.execute(
@@ -193,7 +207,6 @@ def save_invoice_meta(
                 datetime.utcnow().isoformat(timespec="seconds") + "Z",
             ),
         )
-
 
 def get_invoice_meta(client_invoice_ref: str) -> dict | None:
     with get_db() as db:
@@ -235,7 +248,6 @@ def save_notification(event: dict, valid_hash: bool) -> None:
             ),
         )
 
-
 def get_notifications(limit: int = 500) -> list[dict]:
     with get_db() as db:
         rows = db.execute(
@@ -244,12 +256,11 @@ def get_notifications(limit: int = 500) -> list[dict]:
     result = []
     for row in rows:
         d = dict(row)
-        d["valid_hash"] = bool(d["valid_hash"])
+        d["valid_hash"]         = bool(d["valid_hash"])
         d["payment_references"] = json.loads(d["payment_references"] or "[]")
-        d["raw"] = json.loads(d["raw"] or "{}")
+        d["raw"]                = json.loads(d["raw"] or "{}")
         result.append(d)
     return result
-
 
 def clear_notifications() -> None:
     with get_db() as db:
@@ -284,46 +295,45 @@ def record_ip(ip: str) -> None:
 # ─── Secure hash ──────────────────────────────────────────────────────────────
 
 def compute_secure_hash(
-        api_client_id: str,
-        amount: str,
-        service_id: str,
-        client_id_number: str,
-        bill_ref_number: str,
-        bill_desc: str,
-        client_name: str,
+    api_client_id: str,
+    amount: str,
+    service_id: str,
+    client_id_number: str,
+    bill_ref_number: str,
+    bill_desc: str,
+    client_name: str,
 ) -> str:
     data_string = (
-            api_client_id
-            + amount
-            + service_id
-            + client_id_number
-            + CURRENCY
-            + bill_ref_number
-            + bill_desc
-            + client_name
-            + API_SECRET
+        api_client_id
+        + amount
+        + service_id
+        + client_id_number
+        + CURRENCY
+        + bill_ref_number
+        + bill_desc
+        + client_name
+        + API_SECRET
     )
     raw_hash = hmac.new(API_KEY.encode(), data_string.encode(), hashlib.sha256).digest()
     return base64.b64encode(raw_hash).decode()
-
 
 def validate_notification_hash(event: dict) -> bool:
     received = event.get("secure_hash", "")
     if not received:
         return False
-    ref = event.get("client_invoice_ref", "")
+    ref  = event.get("client_invoice_ref", "")
     meta = get_invoice_meta(ref)
     if not meta:
         return False
     account_id_str = str(ACCOUNT_ID)
     expected = compute_secure_hash(
-        api_client_id=account_id_str,
-        amount=meta["amount"],
-        service_id=account_id_str,
-        client_id_number=meta["id_number"],
-        bill_ref_number=ref,
-        bill_desc=meta["desc"],
-        client_name=meta["name"],
+        api_client_id    = account_id_str,
+        amount           = meta["amount"],
+        service_id       = account_id_str,
+        client_id_number = meta["id_number"],
+        bill_ref_number  = ref,
+        bill_desc        = meta["desc"],
+        client_name      = meta["name"],
     )
     return hmac.compare_digest(received, expected)
 
@@ -344,12 +354,10 @@ def generate_token() -> str | None:
         print(f"  [1/5] ✗ Token generation failed: {e}")
         return None
 
-
 def normalize_checkout_html(html: str) -> str:
     for private_host in PRIVATE_HOSTS:
         html = html.replace(private_host, PUBLIC_HOST)
     return html
-
 
 def extract_invoice_number(payload: dict | str) -> str | None:
     if isinstance(payload, dict):
@@ -371,7 +379,6 @@ def extract_invoice_number(payload: dict | str) -> str | None:
     )
     return match.group(1) if match else None
 
-
 def create_invoice(token: str, payload: dict) -> dict:
     resp = requests.post(
         f"{BASE_URL}/invoice/create",
@@ -384,13 +391,13 @@ def create_invoice(token: str, payload: dict) -> dict:
         timeout=30,
     )
     resp.raise_for_status()
-    text = resp.text or ""
+    text         = resp.text or ""
     content_type = (resp.headers.get("Content-Type") or "").lower()
-    stripped = text.lstrip()
+    stripped     = text.lstrip()
     if (
-            "text/html" in content_type
-            or stripped.startswith("<!DOCTYPE")
-            or stripped.startswith("<html")
+        "text/html" in content_type
+        or stripped.startswith("<!DOCTYPE")
+        or stripped.startswith("<html")
     ):
         html = normalize_checkout_html(text)
         return {"kind": "html", "html": html, "invoice_number": extract_invoice_number(html)}
@@ -403,40 +410,37 @@ def create_invoice(token: str, payload: dict) -> dict:
         raise
     return {"kind": "json", "data": data}
 
-
 def build_checkout_params(
-        *, name, msisdn, email, id_number, amount,
-        bill_ref, desc, callback_url, notif_url,
+    *, name, msisdn, email, id_number, amount,
+    bill_ref, desc, callback_url, notif_url,
 ) -> dict[str, str]:
     account_id_str = str(ACCOUNT_ID)
     amount_str = f"{float(amount):.2f}"
     params = {
         "apiClientID": account_id_str,
-        "secureHash": compute_secure_hash(
+        "secureHash":  compute_secure_hash(
             account_id_str, amount_str, account_id_str,
             id_number, bill_ref, desc, name,
         ),
-        "billDesc": desc,
-        "billRefNumber": bill_ref,
-        "currency": CURRENCY,
-        "serviceID": account_id_str,
-        "clientMSISDN": msisdn,
-        "clientName": name,
-        "clientIDNumber": id_number,
-        "clientEmail": email,
+        "billDesc":        desc,
+        "billRefNumber":   bill_ref,
+        "currency":        CURRENCY,
+        "serviceID":       account_id_str,
+        "clientMSISDN":    msisdn,
+        "clientName":      name,
+        "clientIDNumber":  id_number,
+        "clientEmail":     email,
         "notificationURL": notif_url,
-        "amountExpected": amount_str,
+        "amountExpected":  amount_str,
     }
     if callback_url:
         params["callBackURLOnSuccess"] = callback_url
     return params
 
-
 def store_checkout_form(params: dict[str, str]) -> str:
     checkout_id = uuid.uuid4().hex
     _checkout_forms[checkout_id] = params
     return checkout_id
-
 
 def fetch_checkout_page(params: dict[str, str]) -> str:
     response = requests.post(CHECKOUT_URL, data=params, timeout=30)
@@ -610,6 +614,7 @@ form.addEventListener('submit', async (e) => {
 </body>
 </html>
 """
+
 
 # ─── HTML: Monitor page ────────────────────────────────────────────────────────
 
@@ -913,18 +918,16 @@ def index():
         logs_url=f"{HOST}/logs/",
     )
 
-
 @app.route("/monitor")
 def monitor():
     return render_template_string(MONITOR_HTML)
 
-
 @app.route("/notify", methods=["POST"])
 def notify():
     ip = (
-            request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            or request.remote_addr
-            or "unknown"
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.remote_addr
+        or "unknown"
     )
     record_ip(ip)
     try:
@@ -942,9 +945,9 @@ def notify():
     print(f"  Events     : {len(events)}")
     print(sep)
     for i, event in enumerate(events, 1):
-        ref = event.get("client_invoice_ref", "?")
-        status = event.get("status", "?")
-        amount = event.get("amount_paid", "?")
+        ref     = event.get("client_invoice_ref", "?")
+        status  = event.get("status", "?")
+        amount  = event.get("amount_paid", "?")
         invoice = event.get("invoice_number", "?")
         channel = event.get("payment_channel", "?")
         print(f"  Event {i}:")
@@ -961,7 +964,6 @@ def notify():
         save_notification(event, valid)
     print(f"{sep}\n")
     return "", 200
-
 
 @app.route("/test-notify", methods=["POST"])
 def test_notify():
@@ -989,17 +991,14 @@ def test_notify():
         save_notification(event, False)
     return jsonify({"injected": len(sample)}), 200
 
-
 @app.route("/api/notifications", methods=["GET"])
 def api_notifications():
     return jsonify({"events": get_notifications()})
-
 
 @app.route("/api/notifications", methods=["DELETE"])
 def api_clear():
     clear_notifications()
     return jsonify({"cleared": True})
-
 
 @app.route("/api/ips", methods=["GET"])
 def api_ips():
@@ -1009,7 +1008,6 @@ def api_ips():
             "FROM capitalpay_ips ORDER BY hit_count DESC"
         ).fetchall()
     return jsonify({"ips": [dict(r) for r in rows]})
-
 
 @app.route("/go/<checkout_id>")
 def hosted_checkout_redirect(checkout_id: str):
@@ -1022,22 +1020,21 @@ def hosted_checkout_redirect(checkout_id: str):
         return Response(str(exc), status=502)
     return Response(html, mimetype="text/html")
 
-
 @app.route("/checkout", methods=["POST"])
 def checkout():
     data = request.get_json() or {}
 
-    name = data.get("name", "")
-    msisdn = data.get("msisdn", "")
-    email = data.get("email", "")
-    id_number = data.get("id_number", "")
-    amount = data.get("amount", "0")
-    bill_ref = data.get("bill_ref", "")
-    desc = data.get("desc", "")
+    name         = data.get("name", "")
+    msisdn       = data.get("msisdn", "")
+    email        = data.get("email", "")
+    id_number    = data.get("id_number", "")
+    amount       = data.get("amount", "0")
+    bill_ref     = data.get("bill_ref", "")
+    desc         = data.get("desc", "")
     callback_url = data.get("callback_url") or ""
-    notif_url = data.get("notification_url") or ""
+    notif_url    = data.get("notification_url") or ""
     account_id_str = str(ACCOUNT_ID)
-    amount_str = f"{float(amount):.2f}"
+    amount_str     = f"{float(amount):.2f}"
 
     sep = "─" * 54
     print(f"\n{sep}")
@@ -1060,40 +1057,40 @@ def checkout():
 
     print("  [2/5] Computing secure hash…")
     secure_hash = compute_secure_hash(
-        api_client_id=account_id_str,
-        amount=amount_str,
-        service_id=account_id_str,
-        client_id_number=id_number,
-        bill_ref_number=bill_ref,
-        bill_desc=desc,
-        client_name=name,
+        api_client_id    = account_id_str,
+        amount           = amount_str,
+        service_id       = account_id_str,
+        client_id_number = id_number,
+        bill_ref_number  = bill_ref,
+        bill_desc        = desc,
+        client_name      = name,
     )
     print(f"  [2/5] ✓ secure_hash: {secure_hash[:32]}…")
 
     print("  [3/5] Creating invoice with CapitalPay API…")
     invoice_payload = {
-        "account_id": account_id_str,
-        "amount_expected": amount_str,
+        "account_id":             account_id_str,
+        "amount_expected":        amount_str,
         "amount_settled_offline": 0,
-        "callback_url": callback_url,
-        "client_invoice_ref": bill_ref,
-        "currency": CURRENCY,
-        "email": email,
-        "format": "json",
-        "id_number": id_number,
+        "callback_url":           callback_url,
+        "client_invoice_ref":     bill_ref,
+        "currency":               CURRENCY,
+        "email":                  email,
+        "format":                 "json",
+        "id_number":              id_number,
         "items": [{
-            "account_id": ACCOUNT_ID,
-            "desc": desc,
-            "item_ref": bill_ref,
-            "price": amount_str,
-            "quantity": "1",
+            "account_id":         ACCOUNT_ID,
+            "desc":               desc,
+            "item_ref":           bill_ref,
+            "price":              amount_str,
+            "quantity":           "1",
             "require_settlement": "false",
         }],
-        "msisdn": msisdn,
-        "name": name,
-        "notification_url": notif_url,
+        "msisdn":             msisdn,
+        "name":               name,
+        "notification_url":   notif_url,
         "payment_gateway_id": 1,
-        "send_stk": False,
+        "send_stk":           False,
     }
 
     try:
@@ -1106,21 +1103,21 @@ def checkout():
         print("  [3/5] ✗ Unexpected HTML response from invoice API")
         return jsonify({"error": "Unexpected HTML response from invoice API."}), 500
 
-    api_data = result["data"]
+    api_data    = result["data"]
     invoice_ref = extract_invoice_number(api_data) or bill_ref
     print(f"  [3/5] ✓ Invoice created: {invoice_ref}")
 
     print("  [4/5] Saving invoice meta to SQLite…")
     save_invoice_meta(
-        client_invoice_ref=bill_ref,
-        invoice_number=invoice_ref,
-        amount=amount_str,
-        name=name,
-        id_number=id_number,
-        desc=desc,
-        msisdn=msisdn,
-        email=email,
-        secure_hash=secure_hash,
+        client_invoice_ref = bill_ref,
+        invoice_number     = invoice_ref,
+        amount             = amount_str,
+        name               = name,
+        id_number          = id_number,
+        desc               = desc,
+        msisdn             = msisdn,
+        email              = email,
+        secure_hash        = secure_hash,
     )
     print(f"  [4/5] ✓ Saved — ref: {bill_ref}, hash stored for notification validation")
 
@@ -1130,13 +1127,13 @@ def checkout():
         amount=amount_str, bill_ref=bill_ref, desc=desc,
         callback_url=callback_url, notif_url=notif_url,
     )
-    checkout_id = store_checkout_form(checkout_params)
+    checkout_id  = store_checkout_form(checkout_params)
     checkout_url = f"{HOST}/go/{checkout_id}"
     print(f"  [5/5] ✓ Checkout URL: {checkout_url}")
     print(f"{sep}\n")
 
     return jsonify({
-        "invoice_ref": invoice_ref,
+        "invoice_ref":  invoice_ref,
         "checkout_url": checkout_url,
         "api_response": api_data,
     })
@@ -1144,236 +1141,223 @@ def checkout():
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
 
-# ─── Dash terminal UI (mounted on same Flask server at /logs/) ────────────────
+# ─── Terminal Logs UI — pure Flask, zero extra dependencies ──────────────────
+# Simple session-based login. No Dash, no dash_auth needed.
 
-def build_dash_app():
-    try:
-        import dash
-        import dash_auth
-        from dash import dcc, html, Input, Output
-    except ImportError as e:
-        print(f"\n  ⚠  Terminal UI disabled: {e}")
-        print(f"  ⚠  Run:  pip install dash dash-auth")
-        print(f"  ⚠  Then restart the app.\n")
-        return None
+LOGS_USERNAME = "CP"
+LOGS_PASSWORD = "CP123"
 
-    print("  ✓ dash + dash_auth found — mounting Terminal UI at /logs/")
 
-    dash_app = dash.Dash(
-        __name__,
-        server=app,  # ← share the Flask server
-        url_base_pathname="/logs/",
-        title="CapitalPay · Terminal Logs",
-        suppress_callback_exceptions=True,
-    )
 
-    dash_auth.BasicAuth(dash_app, {"CP": "CP123"})
+# ─── Flask /logs/ routes ──────────────────────────────────────────────────────
 
-    def stat_card(label, value, color="#e8eaf0"):
-        return html.Div(style={
-            "background": "#161a22", "border": "1px solid #252b38",
-            "borderRadius": "10px", "padding": "10px 16px", "minWidth": "120px",
-        }, children=[
-            html.Div(label, style={"fontSize": "10px", "color": "#6b7280",
-                                   "textTransform": "uppercase", "letterSpacing": ".06em",
-                                   "fontFamily": "sans-serif", "marginBottom": "4px"}),
-            html.Div(str(value), style={"fontSize": "22px", "fontWeight": "700",
-                                        "color": color, "fontFamily": "sans-serif", "lineHeight": "1"}),
-        ])
+@app.route("/logs/", methods=["GET"])
+@app.route("/logs", methods=["GET"])
+def logs_page():
+    from flask import session
+    if not session.get("logs_authed"):
+        return _logs_login_html()
+    return _logs_terminal_html()
 
-    dash_app.layout = html.Div(style={
-        "background": "#0d0f14", "minHeight": "100vh",
-        "fontFamily": "'Fira Mono','Courier New',monospace", "margin": "0", "padding": "0",
-    }, children=[
 
-        # ── Header ──────────────────────────────────────────────────────
-        html.Div(style={
-            "background": "#161a22", "borderBottom": "1px solid #252b38",
-            "padding": "16px 28px", "display": "flex", "alignItems": "center", "gap": "14px",
-        }, children=[
-            html.Div("C", style={
-                "width": "36px", "height": "36px", "flexShrink": "0",
-                "background": "linear-gradient(135deg,#e05a1e,#f07a3a)",
-                "borderRadius": "8px", "display": "flex", "alignItems": "center",
-                "justifyContent": "center", "color": "#fff", "fontWeight": "700",
-                "fontSize": "16px", "fontFamily": "sans-serif",
-            }),
-            html.Div([
-                html.Span("Terminal Logs", style={
-                    "color": "#e8eaf0", "fontWeight": "600", "fontSize": "15px",
-                    "fontFamily": "sans-serif",
-                }),
-                html.Span(f" · Account {ACCOUNT_ID} · TZS", style={
-                    "color": "#6b7280", "fontSize": "12px",
-                    "fontFamily": "sans-serif", "marginLeft": "8px",
-                }),
-            ]),
-            html.Div(style={"marginLeft": "auto", "display": "flex", "gap": "8px"}, children=[
-                html.Span("● LIVE", id="live-badge", style={
-                    "background": "rgba(34,197,94,.15)", "border": "1px solid rgba(34,197,94,.3)",
-                    "color": "#22c55e", "borderRadius": "20px", "padding": "3px 12px",
-                    "fontSize": "11px", "fontWeight": "700", "fontFamily": "sans-serif",
-                }),
-                html.A("← Checkout", href=f"{HOST}/", target="_blank", style={
-                    "background": "rgba(224,90,30,.12)", "border": "1px solid rgba(224,90,30,.25)",
-                    "color": "#f07a3a", "borderRadius": "20px", "padding": "3px 12px",
-                    "fontSize": "11px", "fontWeight": "700", "textDecoration": "none",
-                    "fontFamily": "sans-serif",
-                }),
-                html.A("📊 Monitor", href=f"{HOST}/monitor", target="_blank", style={
-                    "background": "rgba(224,90,30,.12)", "border": "1px solid rgba(224,90,30,.25)",
-                    "color": "#f07a3a", "borderRadius": "20px", "padding": "3px 12px",
-                    "fontSize": "11px", "fontWeight": "700", "textDecoration": "none",
-                    "fontFamily": "sans-serif",
-                }),
-            ]),
-        ]),
+@app.route("/logs/login", methods=["POST"])
+def logs_login():
+    from flask import session, redirect
+    u = request.form.get("username","").strip()
+    p = request.form.get("password","").strip()
+    if u == LOGS_USERNAME and p == LOGS_PASSWORD:
+        session["logs_authed"] = True
+        return redirect("/logs/")
+    return _logs_login_html(error="Invalid username or password.")
 
-        # ── Stats bar ────────────────────────────────────────────────────
-        html.Div(id="stats-bar", style={
-            "display": "flex", "gap": "12px", "padding": "16px 28px",
-            "borderBottom": "1px solid #252b38", "flexWrap": "wrap",
-        }),
 
-        # ── Filter bar ───────────────────────────────────────────────────
-        html.Div(style={
-            "display": "flex", "gap": "10px", "padding": "12px 28px",
-            "alignItems": "center", "borderBottom": "1px solid #252b38", "flexWrap": "wrap",
-        }, children=[
-            dcc.Input(
-                id="filter-text", type="text",
-                placeholder="Filter logs…", debounce=True,
-                style={
-                    "background": "#1e2330", "border": "1px solid #252b38",
-                    "borderRadius": "8px", "color": "#e8eaf0", "padding": "7px 12px",
-                    "fontSize": "12px", "fontFamily": "monospace", "width": "260px", "outline": "none",
-                }
-            ),
-            dcc.Dropdown(
-                id="filter-level",
-                options=[
-                    {"label": "All lines", "value": "all"},
-                    {"label": "✓ VALID hashes", "value": "VALID"},
-                    {"label": "✗ INVALID hashes", "value": "INVALID"},
-                    {"label": "Webhook hits", "value": "WEBHOOK"},
-                    {"label": "Checkout only", "value": "CHECKOUT"},
-                    {"label": "IP events", "value": "[IP]"},
-                    {"label": "Errors only", "value": "✗"},
-                ],
-                value="all", clearable=False,
-                style={
-                    "width": "200px", "fontSize": "12px",
-                    "fontFamily": "sans-serif",
-                }
-            ),
-            html.Span(id="line-count", style={
-                "color": "#6b7280", "fontSize": "12px",
-                "fontFamily": "sans-serif", "marginLeft": "auto",
-            }),
-            html.Button("Clear", id="btn-clear", n_clicks=0, style={
-                "background": "rgba(239,68,68,.12)", "border": "1px solid rgba(239,68,68,.3)",
-                "color": "#ef4444", "borderRadius": "8px", "padding": "6px 14px",
-                "fontSize": "12px", "cursor": "pointer", "fontFamily": "sans-serif",
-            }),
-        ]),
+@app.route("/logs/logout")
+def logs_logout():
+    from flask import session, redirect
+    session.pop("logs_authed", None)
+    return redirect("/logs/")
 
-        # ── Log output ───────────────────────────────────────────────────
-        html.Div(id="log-output", style={
-            "padding": "16px 28px",
-            "minHeight": "calc(100vh - 220px)",
-        }),
 
-        dcc.Store(id="clear-rev", data=0),
-        dcc.Interval(id="tick", interval=2000, n_intervals=0),
-    ])
+@app.route("/api/logs", methods=["GET"])
+def api_logs():
+    return jsonify({"lines": get_log_lines()})
 
-    # ── Callbacks ────────────────────────────────────────────────────────
 
-    @dash_app.callback(
-        Output("stats-bar", "children"),
-        Output("log-output", "children"),
-        Output("line-count", "children"),
-        Input("tick", "n_intervals"),
-        Input("clear-rev", "data"),
-        Input("filter-text", "value"),
-        Input("filter-level", "value"),
-    )
-    def refresh(_, clear_rev, ftext, flevel):
-        lines = get_log_lines()
+@app.route("/api/logs", methods=["DELETE"])
+def api_logs_clear():
+    while not LOG_QUEUE.empty():
+        try:
+            LOG_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+    return jsonify({"cleared": True})
 
-        total = len(lines)
-        webhooks = sum(1 for l in lines if "INCOMING WEBHOOK" in l)
-        checkouts = sum(1 for l in lines if "NEW CHECKOUT" in l)
-        valid_h = sum(1 for l in lines if "✓ VALID" in l)
-        invalid_h = sum(1 for l in lines if "✗ INVALID" in l or "✗ UNVERIFIABLE" in l)
 
-        stats = [
-            stat_card("Total lines", total),
-            stat_card("Webhooks", webhooks, "#f07a3a"),
-            stat_card("Checkouts", checkouts, "#f07a3a"),
-            stat_card("Hash valid", valid_h, "#22c55e"),
-            stat_card("Hash invalid", invalid_h, "#ef4444" if invalid_h else "#6b7280"),
-        ]
+def _logs_base(body: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CapitalPay · Terminal Logs</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d0f14;color:#e8eaf0;font-family:'Fira Mono','Courier New',monospace;min-height:100vh}}
+.hd{{background:#161a22;border-bottom:1px solid #252b38;padding:14px 24px;
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
+.logo{{width:34px;height:34px;background:linear-gradient(135deg,#e05a1e,#f07a3a);
+  border-radius:8px;display:flex;align-items:center;justify-content:center;
+  color:#fff;font-weight:700;font-size:15px;font-family:sans-serif;flex-shrink:0}}
+.title{{color:#e8eaf0;font-weight:600;font-size:15px;font-family:sans-serif}}
+.sub{{color:#6b7280;font-size:12px;font-family:sans-serif;margin-left:4px}}
+.hd-right{{margin-left:auto;display:flex;gap:8px;align-items:center}}
+.pill{{background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.3);
+  color:#22c55e;border-radius:20px;padding:3px 12px;font-size:11px;font-weight:700;font-family:sans-serif}}
+.lnk{{background:rgba(224,90,30,.12);border:1px solid rgba(224,90,30,.25);
+  color:#f07a3a;border-radius:20px;padding:3px 12px;font-size:11px;
+  font-weight:700;font-family:sans-serif;text-decoration:none}}
+.lnk:hover{{background:rgba(224,90,30,.22)}}
+.stats{{display:flex;gap:12px;padding:14px 24px;border-bottom:1px solid #252b38;flex-wrap:wrap}}
+.stat{{background:#161a22;border:1px solid #252b38;border-radius:10px;padding:10px 16px;min-width:110px}}
+.slbl{{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.06em;
+  font-family:sans-serif;margin-bottom:4px}}
+.sval{{font-size:22px;font-weight:700;line-height:1;font-family:sans-serif}}
+.bar{{display:flex;gap:8px;padding:10px 24px;border-bottom:1px solid #252b38;
+  align-items:center;flex-wrap:wrap}}
+.bar input{{background:#1e2330;border:1px solid #252b38;border-radius:8px;
+  color:#e8eaf0;padding:6px 12px;font-size:12px;font-family:monospace;width:240px;outline:none}}
+.bar input:focus{{border-color:#e05a1e}}
+.bar select{{background:#1e2330;border:1px solid #252b38;border-radius:8px;
+  color:#e8eaf0;padding:6px 10px;font-size:12px;font-family:sans-serif;outline:none}}
+.cnt{{color:#6b7280;font-size:12px;font-family:sans-serif;margin-left:auto}}
+.clr{{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);
+  color:#ef4444;border-radius:8px;padding:5px 14px;font-size:12px;cursor:pointer;font-family:sans-serif}}
+.clr:hover{{background:rgba(239,68,68,.22)}}
+.feed{{padding:12px 24px}}
+.line{{font-size:12px;line-height:1.8;white-space:pre-wrap;word-break:break-all;
+  border-bottom:1px solid rgba(37,43,56,.4);padding:1px 0}}
+.empty{{color:#6b7280;font-size:13px;font-family:sans-serif;padding:20px 0}}
+.login-wrap{{min-height:100vh;display:flex;align-items:center;justify-content:center}}
+.login-card{{background:#161a22;border:1px solid #252b38;border-radius:16px;
+  padding:36px 40px;width:100%;max-width:360px;box-shadow:0 24px 48px rgba(0,0,0,.5)}}
+.login-card h2{{font-family:sans-serif;font-size:20px;color:#e8eaf0;margin-bottom:6px}}
+.login-card p{{font-family:sans-serif;font-size:13px;color:#6b7280;margin-bottom:24px}}
+.login-card label{{display:block;font-size:11px;font-weight:600;letter-spacing:.06em;
+  text-transform:uppercase;color:#6b7280;font-family:sans-serif;margin-bottom:6px}}
+.login-card input{{width:100%;background:#1e2330;border:1px solid #252b38;
+  border-radius:10px;color:#e8eaf0;font-family:sans-serif;font-size:14px;
+  padding:10px 14px;outline:none;margin-bottom:16px;display:block}}
+.login-card input:focus{{border-color:#e05a1e}}
+.login-btn{{width:100%;padding:12px;background:linear-gradient(135deg,#e05a1e,#f07a3a);
+  border:none;border-radius:10px;color:#fff;font-family:sans-serif;
+  font-size:15px;font-weight:600;cursor:pointer}}
+.login-btn:hover{{opacity:.9}}
+.err{{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);
+  color:#ef4444;border-radius:8px;padding:10px 14px;font-size:13px;
+  font-family:sans-serif;margin-bottom:16px}}
+</style>
+</head>
+<body>{body}</body>
+</html>"""
 
-        filtered = list(lines)
-        if clear_rev:
-            filtered = []
-        if flevel and flevel != "all":
-            filtered = [l for l in filtered if flevel in l]
-        if ftext:
-            q = ftext.lower()
-            filtered = [l for l in filtered if q in l.lower()]
 
-        count = f"{len(filtered):,} line{'s' if len(filtered) != 1 else ''}"
+def _logs_login_html(error: str = "") -> str:
+    err_html = f'<div class="err">{error}</div>' if error else ""
+    body = f"""
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="logo" style="margin-bottom:18px">C</div>
+    <h2>Terminal Logs</h2>
+    <p>CapitalPay &nbsp;·&nbsp; Account {ACCOUNT_ID} &nbsp;·&nbsp; TZS</p>
+    {err_html}
+    <form method="POST" action="/logs/login">
+      <label>Username</label>
+      <input name="username" type="text" placeholder="CP" autocomplete="off"/>
+      <label>Password</label>
+      <input name="password" type="password" placeholder="••••••"/>
+      <button class="login-btn" type="submit">Sign in</button>
+    </form>
+  </div>
+</div>"""
+    return _logs_base(body)
 
-        if not filtered:
-            output = html.Div(
-                "No log lines yet — waiting for activity…",
-                style={"color": "#6b7280", "fontSize": "13px",
-                       "fontFamily": "sans-serif", "padding": "12px 0"},
-            )
-        else:
-            def line_color(line):
-                if any(x in line for x in ["✓ VALID", "[1/5] ✓", "[2/5] ✓", "[3/5] ✓", "[4/5] ✓", "[5/5] ✓"]):
-                    return "#22c55e"
-                if any(x in line for x in ["✗ INVALID", "✗ UNVERIFIABLE", "✗ Failed", "failed"]):
-                    return "#ef4444"
-                if any(x in line for x in ["INCOMING WEBHOOK", "NEW CHECKOUT REQUEST"]):
-                    return "#f07a3a"
-                if any(x in line for x in ["Source IP", "[IP]", "allowlist"]):
-                    return "#a78bfa"
-                if "─" * 8 in line or "=" * 8 in line:
-                    return "#252b38"
-                return "#8b949e"
 
-            output = html.Div([
-                html.Div(line, style={
-                    "color": line_color(line),
-                    "fontSize": "12px", "lineHeight": "1.8",
-                    "whiteSpace": "pre-wrap", "wordBreak": "break-all",
-                    "borderBottom": "1px solid rgba(37,43,56,.4)",
-                    "padding": "1px 0",
-                })
-                for line in filtered
-            ])
-
-        return stats, output, count
-
-    @dash_app.callback(
-        Output("clear-rev", "data"),
-        Input("btn-clear", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def clear_logs(n):
-        while not LOG_QUEUE.empty():
-            try:
-                LOG_QUEUE.get_nowait()
-            except queue.Empty:
-                break
-        return n
-
-    print(f"  ✓ Terminal UI ready at {HOST}/logs/  (user: CP  pass: CP123)")
-    return dash_app
+def _logs_terminal_html() -> str:
+    body = f"""
+<div class="hd">
+  <div class="logo">C</div>
+  <span class="title">Terminal Logs</span>
+  <span class="sub">· Account {ACCOUNT_ID} · TZS</span>
+  <div class="hd-right">
+    <span class="pill">&#9679; LIVE</span>
+    <a class="lnk" href="/" target="_blank">&#8592; Checkout</a>
+    <a class="lnk" href="/monitor" target="_blank">&#128202; Monitor</a>
+    <a class="lnk" href="/logs/logout">Sign out</a>
+  </div>
+</div>
+<div class="stats" id="stats"></div>
+<div class="bar">
+  <input id="ft" type="text" placeholder="Filter logs&#8230;" oninput="render()"/>
+  <select id="fl" onchange="render()">
+    <option value="all">All lines</option>
+    <option value="VALID">&#10003; VALID hashes</option>
+    <option value="INVALID">&#10007; INVALID hashes</option>
+    <option value="WEBHOOK">Webhook hits</option>
+    <option value="CHECKOUT">Checkout only</option>
+    <option value="[IP]">IP events</option>
+  </select>
+  <span class="cnt" id="cnt"></span>
+  <button class="clr" onclick="clearLogs()">Clear</button>
+</div>
+<div class="feed" id="feed"><div class="empty">Waiting for activity&#8230;</div></div>
+<script>
+var all=[];
+function col(l){{
+  if(/\\u2713 VALID|\\[1\\/5\\] \\u2713|\\[2\\/5\\] \\u2713|\\[3\\/5\\] \\u2713|\\[4\\/5\\] \\u2713|\\[5\\/5\\] \\u2713/.test(l)) return '#22c55e';
+  if(/\\u2717 INVALID|\\u2717 UNVERIFIABLE|\\u2717 Failed|failed/.test(l)) return '#ef4444';
+  if(/INCOMING WEBHOOK|NEW CHECKOUT REQUEST/.test(l)) return '#f07a3a';
+  if(/Source IP|\\[IP\\]|allowlist/.test(l)) return '#a78bfa';
+  if(l.indexOf('--')>=0&&l.length<6) return '#252b38';
+  return '#8b949e';
+}}
+function esc(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+function render(){{
+  var q=document.getElementById('ft').value.toLowerCase();
+  var lv=document.getElementById('fl').value;
+  var f=all.slice();
+  if(lv!=='all') f=f.filter(function(l){{return l.indexOf(lv)>=0;}});
+  if(q) f=f.filter(function(l){{return l.toLowerCase().indexOf(q)>=0;}});
+  document.getElementById('cnt').textContent=f.length+' line'+(f.length===1?'':'s');
+  var feed=document.getElementById('feed');
+  if(!f.length){{feed.innerHTML='<div class="empty">No matching lines.</div>';return;}}
+  feed.innerHTML=f.map(function(l){{
+    return '<div class="line" style="color:'+col(l)+'">'+esc(l)+'</div>';
+  }}).join('');
+}}
+function stats(lines){{
+  var t=lines.length;
+  var w=lines.filter(function(l){{return l.indexOf('INCOMING WEBHOOK')>=0;}}).length;
+  var c=lines.filter(function(l){{return l.indexOf('NEW CHECKOUT REQUEST')>=0;}}).length;
+  var v=lines.filter(function(l){{return l.indexOf('\\u2713 VALID')>=0;}}).length;
+  var i=lines.filter(function(l){{return l.indexOf('\\u2717 INVALID')>=0||l.indexOf('\\u2717 UNVERIFIABLE')>=0;}}).length;
+  document.getElementById('stats').innerHTML=[
+    ['Total lines',t,'#e8eaf0'],['Webhooks',w,'#f07a3a'],
+    ['Checkouts',c,'#f07a3a'],['Hash valid',v,'#22c55e'],
+    ['Hash invalid',i,i?'#ef4444':'#6b7280'],
+  ].map(function(s){{
+    return '<div class="stat"><div class="slbl">'+s[0]+'</div>'+
+      '<div class="sval" style="color:'+s[2]+'">'+s[1]+'</div></div>';
+  }}).join('');
+}}
+function poll(){{
+  fetch('/api/logs').then(function(r){{return r.json();}}).then(function(d){{
+    all=d.lines; stats(all); render();
+  }}).catch(function(){{}});
+}}
+function clearLogs(){{fetch('/api/logs',{{method:'DELETE'}}).then(poll);}}
+poll(); setInterval(poll,2000);
+</script>"""
+    return _logs_base(body)
 
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
@@ -1387,27 +1371,17 @@ def open_browser():
 
 if __name__ == "__main__":
     init_db()
-
-    # Mount Dash on the same Flask app (single port, no ERR_CONNECTION_REFUSED)
-    dash_result = build_dash_app()
-    if dash_result is None:
-        print("  Continuing without Terminal UI — install dash + dash-auth to enable it.")
-
     sep = "=" * 54
     print(f"\n{sep}")
     print(f"  CapitalPay Checkout  |  Account ID: {ACCOUNT_ID}  |  TZS")
     print(sep)
-    print(f"  DB          →  {DB_PATH}")
-    print(f"  Checkout    →  {HOST}/")
-    print(f"  Monitor     →  {HOST}/monitor")
-    print(f"  Webhook     →  {HOST}/notify")
-    print(f"  Terminal UI →  {HOST}/logs/   (user: CP  pass: CP123)")
+    print(f"  DB          ->  {DB_PATH}")
+    print(f"  Checkout    ->  {HOST}/")
+    print(f"  Monitor     ->  {HOST}/monitor")
+    print(f"  Webhook     ->  {HOST}/notify")
+    print(f"  Terminal UI ->  {HOST}/logs/   (user: CP  pass: CP123)")
     print(sep)
-    print(f"  ┌─ IP Allowlist Note ──────────────────────────────────┐")
-    print(f"  │  Every IP that POSTs to /notify is printed here and  │")
-    print(f"  │  saved to the DB. Check /monitor → Server IPs table  │")
-    print(f"  │  after a real payment to get CapitalPay\'s IP.       │")
-    print(f"  └──────────────────────────────────────────────────────┘")
+    print(f"  IP Allowlist: Every IP hitting /notify is logged in terminal + DB")
     print(f"{sep}\n")
 
     is_render = bool(os.environ.get("RENDER_EXTERNAL_URL"))
