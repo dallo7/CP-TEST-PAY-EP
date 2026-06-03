@@ -443,7 +443,15 @@ def store_checkout_form(params: dict[str, str]) -> str:
     return checkout_id
 
 def fetch_checkout_page(params: dict[str, str]) -> str:
-    response = requests.post(CHECKOUT_URL, data=params, timeout=30)
+    import urllib.parse
+    # urlencode with quote() prevents double-encoding of Base64 chars (+, /, =) in secureHash
+    encoded = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    response = requests.post(
+        CHECKOUT_URL,
+        data=encoded,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
     if not response.ok:
         raise RuntimeError(f"Checkout error ({response.status_code}): {response.text[:300]}")
     return normalize_checkout_html(response.text)
