@@ -265,93 +265,6 @@ def _record_callback_event(payload, raw_body):
     }
 
 
-def _record_blocked_notify_event(payload, raw_body, source_ip, reason):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    invoice_number = _first_payload_value(payload, "invoice_number", "invoice_no", "invoice", "payment_ref")
-    client_ref = _first_payload_value(payload, "client_invoice_ref", "bill_ref_number", "billRefNumber", "reference")
-    amount = _first_payload_value(payload, "amount_paid", "paid_amount", "amount", "total_paid") or "0.00"
-    currency = _first_payload_value(payload, "currency") or "TZS"
-    phone = _first_payload_value(payload, "phone_number", "msisdn", "clientMSISDN")
-    payment_date = _first_payload_value(payload, "payment_date", "paid_at", "transaction_date")
-    refs_json = json.dumps(
-        [
-            {
-                "payment_reference": _first_payload_value(payload, "payment_reference", "payment_ref", "receipt"),
-                "payment_date": payment_date,
-                "currency": currency,
-                "amount": amount,
-            }
-        ],
-        sort_keys=True,
-    )
-
-    with notifications.get_db() as db:
-        db.execute(
-            """
-            INSERT INTO capitalpay_ips (ip_address, first_seen, last_seen, hit_count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(ip_address) DO UPDATE SET
-                last_seen = excluded.last_seen,
-                hit_count = capitalpay_ips.hit_count + 1
-            """,
-            (source_ip, now, now),
-        )
-        db.execute(
-            """
-            INSERT INTO notifications (
-                received_at, ip_address, method, headers_json, raw_payload, payload_json,
-                status, valid_hash, hash_value, expected_hash, invoice_number,
-                client_invoice_ref, phone_number, payment_date, payment_channel,
-                currency, invoice_amount, last_payment_amount, amount_paid,
-                payment_references_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                now,
-                source_ip,
-                request.method,
-                json.dumps(dict(request.headers), sort_keys=True),
-                raw_body,
-                json.dumps(
-                    {
-                        "blocked": True,
-                        "reason": reason,
-                        "allowlist": sorted(CAPITALPAY_ALLOWED_IPS),
-                        "payload": payload,
-                    },
-                    sort_keys=True,
-                ),
-                "failed",
-                0,
-                "",
-                reason,
-                invoice_number,
-                client_ref,
-                phone,
-                payment_date,
-                "BLOCKED",
-                currency,
-                _first_payload_value(payload, "invoice_amount", "amount_expected") or amount,
-                amount,
-                amount,
-                refs_json,
-            ),
-        )
-
-    return {
-        "received_at": now,
-        "ip_address": source_ip,
-        "status": "failed",
-        "invoice_number": invoice_number,
-        "client_invoice_ref": client_ref,
-        "amount_paid": amount,
-        "currency": currency,
-        "payment_channel": "BLOCKED",
-        "reason": reason,
-    }
-
-
 def _log_block(title, details):
     print("")
     print("-" * 54)
@@ -662,6 +575,12 @@ def action_btn(label, btn_id, color=RED):
 
 
 def line_color(line):
+    if "Payload quality : GOOD" in line:
+        return GREEN
+    if "Payload quality : BAD" in line or "Payload quality : PARTIAL" in line:
+        return RED if "BAD" in line else WARN
+    if "IP allowlist    : UNKNOWN" in line:
+        return WARN
     if "[BLOCKED]" in line or "DENY" in line or "Blocked source IP" in line:
         return WARN
     if "Hash       : VALID" in line or "paid=True" in line:
@@ -743,8 +662,9 @@ def monitor_layout():
                 style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "20px"},
                 children=[
                     stat_card("Total received", "s-total"),
+                    stat_card("Good payloads", "s-good", GREEN),
+                    stat_card("Bad / partial", "s-bad", RED),
                     stat_card("Settled", "s-settled", GREEN),
-                    stat_card("Hash mismatches", "s-bad", RED),
                     stat_card("Total paid (TZS)", "s-amount"),
                 ],
             ),
@@ -788,6 +708,19 @@ def monitor_layout():
                         {"label": "Hash invalid", "value": "invalid"},
                     ],
                     style={"width": "150px", "fontSize": "12px"},
+                ),
+                dcc.Dropdown(
+                    id="m-quality",
+                    value="",
+                    clearable=False,
+                    options=[
+                        {"label": "All payloads", "value": ""},
+                        {"label": "Good payload", "value": "GOOD"},
+                        {"label": "Partial payload", "value": "PARTIAL"},
+                        {"label": "Bad payload", "value": "BAD"},
+                        {"label": "Unknown IP", "value": "unknown_ip"},
+                    ],
+                    style={"width": "170px", "fontSize": "12px"},
                 ),
                 action_btn("Inject test event", "btn-test-event", ACC2),
                 action_btn("Clear all", "btn-clear-notif", RED),
@@ -845,7 +778,7 @@ def logs_layout():
                     stat_card("Checkouts", "l-checkouts", ACC2),
                     stat_card("Hash valid", "l-valid", GREEN),
                     stat_card("Hash invalid", "l-invalid", RED),
-                    stat_card("Blocked IPs", "l-blocked", WARN),
+                    stat_card("Issues", "l-blocked", WARN),
                 ],
             ),
             filter_bar(
@@ -877,7 +810,8 @@ def logs_layout():
                         {"label": "Webhook hits", "value": "WEBHOOK"},
                         {"label": "Checkout only", "value": "CHECKOUT"},
                         {"label": "IP events", "value": "[IP]"},
-                        {"label": "Blocked IPs", "value": "[BLOCKED]"},
+                        {"label": "Bad payloads", "value": "Payload quality : BAD"},
+                        {"label": "Unknown IPs", "value": "UNKNOWN IP"},
                     ],
                     style={"width": "180px", "fontSize": "12px"},
                 ),
@@ -936,6 +870,11 @@ def captured_payload_panel(ev):
         "margin": "12px 0 6px",
     }
 
+    quality = (ev.get("payload_quality") or "UNKNOWN").upper()
+    q_color = {"GOOD": GREEN, "PARTIAL": WARN, "BAD": RED}.get(quality, MUTED)
+    issues = ev.get("quality_issues") or []
+    missing = [issue.replace("missing ", "") for issue in issues]
+
     return html.Details(
         style={
             "marginTop": "14px",
@@ -954,6 +893,34 @@ def captured_payload_panel(ev):
                     "cursor": "pointer",
                     "letterSpacing": ".03em",
                 },
+            ),
+            html.Div(
+                style={
+                    "display": "flex",
+                    "gap": "8px",
+                    "flexWrap": "wrap",
+                    "margin": "10px 0 4px",
+                },
+                children=[
+                    badge(f"Payload {quality}", q_color),
+                    badge(
+                        "IP on allowlist" if ev.get("ip_allowed", True) else "Unknown IP",
+                        GREEN if ev.get("ip_allowed", True) else WARN,
+                    ),
+                ],
+            ),
+            html.Div(
+                [
+                    html.Span(
+                        "Missing required fields: " if missing else "Required fields: ",
+                        style={"color": MUTED, "fontSize": "11px"},
+                    ),
+                    html.Span(
+                        ", ".join(missing) if missing else "all present (status, invoice_number, client_invoice_ref, amount_paid, currency, payment_reference)",
+                        style={"color": RED if missing else GREEN, "fontSize": "11px", "fontWeight": "600"},
+                    ),
+                ],
+                style={"marginBottom": "8px"},
             ),
             html.Div("Parsed / unpacked payload", style=label_style),
             html.Pre(_pretty(parsed_payload, limit=8000), style=box_style),
@@ -1000,6 +967,11 @@ def event_feed(events):
             "failed": (RED, "FAILED"),
         }.get(ev["status"].lower(), (MUTED, ev["status"].upper()))
         hc = (GREEN, "Hash OK") if ev["valid_hash"] else (RED, "Hash mismatch")
+        quality = (ev.get("payload_quality") or "UNKNOWN").upper()
+        qc = {"GOOD": (GREEN, "GOOD payload"), "PARTIAL": (WARN, "PARTIAL payload"), "BAD": (RED, "BAD payload")}.get(
+            quality, (MUTED, f"{quality} payload")
+        )
+        ipc = (GREEN, "IP OK") if ev.get("ip_allowed", True) else (WARN, "Unknown IP")
         refs_rows = [
             html.Tr(
                 [
@@ -1057,7 +1029,9 @@ def event_feed(events):
                         },
                         children=[
                             badge(sc[1], sc[0]),
+                            badge(qc[1], qc[0]),
                             badge(hc[1], hc[0]),
+                            badge(ipc[1], ipc[0]),
                             badge(ev.get("payment_channel", "-")),
                             html.Span(
                                 f"{ev['received_at']} | {ev['invoice_number']}",
@@ -1315,8 +1289,9 @@ def switch_tab(_, __, current):
 
 @app.callback(
     Output("s-total", "children"),
-    Output("s-settled", "children"),
+    Output("s-good", "children"),
     Output("s-bad", "children"),
+    Output("s-settled", "children"),
     Output("s-amount", "children"),
     Output("m-feed", "children"),
     Output("ip-table", "children"),
@@ -1327,9 +1302,10 @@ def switch_tab(_, __, current):
     State("m-search", "value"),
     State("m-status", "value"),
     State("m-hash", "value"),
+    State("m-quality", "value"),
     prevent_initial_call=False,
 )
-def refresh_monitor(_, clr, tst, search, status_f, hash_f):
+def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
     ctx = callback_context
     if ctx.triggered:
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
@@ -1342,7 +1318,8 @@ def refresh_monitor(_, clr, tst, search, status_f, hash_f):
 
     events = notifications.get_notifications(500)
     settled = [e for e in events if e["status"].lower() == "settled"]
-    bad = [e for e in events if not e["valid_hash"]]
+    good = [e for e in events if (e.get("payload_quality") or "").upper() == "GOOD"]
+    bad = [e for e in events if (e.get("payload_quality") or "").upper() in {"BAD", "PARTIAL"}]
     paid = sum(float(e["amount_paid"] or 0) for e in settled)
 
     filtered = events
@@ -1352,6 +1329,10 @@ def refresh_monitor(_, clr, tst, search, status_f, hash_f):
         filtered = [e for e in filtered if e["valid_hash"]]
     elif hash_f == "invalid":
         filtered = [e for e in filtered if not e["valid_hash"]]
+    if quality_f == "unknown_ip":
+        filtered = [e for e in filtered if not e.get("ip_allowed", True)]
+    elif quality_f:
+        filtered = [e for e in filtered if (e.get("payload_quality") or "").upper() == quality_f]
     if search:
         query = search.lower()
         filtered = [
@@ -1374,8 +1355,9 @@ def refresh_monitor(_, clr, tst, search, status_f, hash_f):
 
     return (
         str(len(events)),
-        str(len(settled)),
+        str(len(good)),
         str(len(bad)),
+        str(len(settled)),
         f"{paid:,.2f}",
         event_feed(filtered),
         ip_table(ips),
@@ -1413,7 +1395,7 @@ def refresh_logs(_, clr, search, level):
     checkouts = sum(1 for line in lines if "NEW CHECKOUT" in line)
     valid = sum(1 for line in lines if "VALID" in line and "INVALID" not in line)
     invalid = sum(1 for line in lines if "INVALID" in line or "UNVERIFIABLE" in line)
-    blocked = sum(1 for line in lines if "[BLOCKED]" in line)
+    blocked = sum(1 for line in lines if "UNKNOWN IP" in line or "Payload quality : BAD" in line)
 
     filtered = lines
     if level and level != "all":
@@ -1707,41 +1689,38 @@ def payment_notify():
         print(f"    {line}")
     print(f"  Source IP candidate: {source_ip}")
     print(f"  Allowlist         : {', '.join(sorted(CAPITALPAY_ALLOWED_IPS)) or '(disabled)'}")
-    if CAPITALPAY_ALLOWED_IPS and source_ip not in CAPITALPAY_ALLOWED_IPS:
-        reason = "source IP is not in CAPITALPAY_ALLOWED_IPS"
-        blocked_event = _record_blocked_notify_event(payload_parts, raw_body, source_ip, reason)
-        print(f"  [BLOCKED] Blocked source IP: {source_ip}")
-        print(f"  Decision: DENY - {reason}")
-        print(
-            "  Recorded in Monitor as "
-            f"payment_channel={blocked_event['payment_channel']} status={blocked_event['status']}"
-        )
-        print("  Responded HTTP 200 without accepting as paid notification")
-        print(sep)
-        return "", 200
-    event = notifications.record_notification(request, capitalpay.API_SECRET)
+    event = notifications.record_notification(request, capitalpay.API_SECRET, CAPITALPAY_ALLOWED_IPS)
+    ip_note = "ALLOWED" if event.get("ip_allowed", True) else "UNKNOWN IP (still recorded)"
     print(sep)
     print("  PARSED WEBHOOK SUMMARY")
     print(sep)
-    print(f"  Timestamp  : {event['received_at']}")
-    print(f"  Source IP  : {event['ip_address']}  <- add to CapitalPay allowlist")
-    print(f"  Invoice    : {event['invoice_number']}  (ref: {event['client_invoice_ref']})")
-    print(f"  Status     : {event['status'].upper()}")
-    print(f"  Amount paid: {event['amount_paid']} {event['currency']}")
-    print(f"  Channel    : {event['payment_channel']}")
-    print(f"  Hash       : {'VALID' if event['valid_hash'] else 'INVALID'}")
+    print(f"  Timestamp       : {event['received_at']}")
+    print(f"  Source IP       : {event['ip_address']}")
+    print(f"  IP allowlist    : {ip_note}")
+    print(f"  Payload quality : {event.get('payload_quality', 'UNKNOWN')}")
+    missing = event.get("quality_missing") or []
+    print(f"  Missing fields  : {', '.join(missing) if missing else 'none'}")
+    print(f"  Invoice         : {event['invoice_number']}  (ref: {event['client_invoice_ref']})")
+    print(f"  Status          : {event['status'].upper()}")
+    print(f"  Amount paid     : {event['amount_paid']} {event['currency']}")
+    print(f"  Channel         : {event['payment_channel']}")
+    print(f"  Hash            : {'VALID' if event['valid_hash'] else 'INVALID'}")
     print(f"  Responded HTTP 200 paid={event['status'] == 'settled'}")
     print(sep)
 
     return jsonify(
         {
             "ok": True,
-            "paid": event["status"] == "settled",
+            "paid": event["status"] == "settled" and event.get("payload_quality") == "GOOD",
             "status": event["status"],
             "invoice_number": event["invoice_number"],
             "client_invoice_ref": event["client_invoice_ref"],
             "sender_ip": event["ip_address"],
             "valid_hash": event["valid_hash"],
+            "payload_quality": event.get("payload_quality"),
+            "quality_issues": event.get("quality_issues", []),
+            "quality_missing": event.get("quality_missing", []),
+            "ip_allowed": event.get("ip_allowed", True),
         }
     )
 
@@ -1807,7 +1786,7 @@ if __name__ == "__main__":
     print(f"  Dashboard   ->  {HOST}/dash/   (user: CP  pass: CP123)")
     print(f"  Webhook     ->  {HOST}/notify")
     print(sep)
-    print("  Every IP hitting /notify is printed and saved to DB")
+    print("  Every POST to /notify is recorded with full payload + GOOD/BAD report")
     print(sep)
     print("")
     if not os.environ.get("RENDER_EXTERNAL_URL"):
