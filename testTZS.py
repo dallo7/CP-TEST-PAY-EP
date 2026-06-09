@@ -38,6 +38,11 @@ GREEN = "#22c55e"
 RED = "#ef4444"
 WARN = "#f59e0b"
 PURP = "#a78bfa"
+IPN_BLUE = "#60a5fa"
+REQUEST_PAYLOAD = "[REQUEST-PAYLOAD]"
+IPN_PAYLOAD = "[IPN-PAYLOAD]"
+LOG_RULE = "=" * 72
+LOG_DIV = "-" * 72
 
 LOG_QUEUE: queue.Queue[str] = queue.Queue(maxsize=500)
 
@@ -266,16 +271,64 @@ def _record_callback_event(payload, raw_body):
     }
 
 
-def _log_block(title, details):
+def _print_payload_lines(content, kind: str, indent: str = "    "):
+    tag = REQUEST_PAYLOAD if kind == "request" else IPN_PAYLOAD
+    for line in _pretty(content).splitlines() or [""]:
+        print(f"{indent}{tag} {line}")
+
+
+def _log_session_start(label: str, detail: str = ""):
     print("")
-    print("-" * 54)
-    print(f"  {title}")
-    print("-" * 54)
-    for label, value in details:
-        print(f"  {label}:")
+    print(LOG_RULE)
+    extra = f"  |  {detail}" if detail else ""
+    print(f"  SESSION START  |  {label}{extra}")
+    print(LOG_RULE)
+
+
+def _log_request_marker(note: str = ""):
+    print(LOG_DIV)
+    print(f"  >>> REQUEST{('  |  ' + note) if note else ''}")
+    print(LOG_DIV)
+
+
+def _log_response_marker(status: str = "", note: str = ""):
+    print(LOG_DIV)
+    bits = ["<<< RESPONSE"]
+    if status:
+        bits.append(status)
+    if note:
+        bits.append(note)
+    print(f"  {'  |  '.join(bits)}")
+    print(LOG_DIV)
+
+
+def _log_summary(title: str):
+    print(LOG_DIV)
+    print(f"  ### {title}")
+    print(LOG_DIV)
+
+
+def _log_session_end(label: str, outcome: str = "COMPLETE"):
+    print(LOG_DIV)
+    print(f"  SESSION END  |  {label}  |  {outcome}")
+    print(LOG_RULE)
+    print("")
+
+
+def _log_detail_block(label: str, value, payload_kind: str | None = None):
+    payload_labels = {"JSON", "Form Data", "Raw Body", "Parsed JSON", "Body", "HTML Preview"}
+    print(f"  {label}:")
+    if payload_kind and label in payload_labels:
+        _print_payload_lines(value, payload_kind)
+    else:
         for line in _pretty(value).splitlines() or [""]:
             print(f"    {line}")
-    print("-" * 54)
+
+
+def _log_block(title, details, payload_kind: str | None = None):
+    _log_request_marker(title)
+    for label, value in details:
+        _log_detail_block(label, value, payload_kind)
 
 
 def _install_verbose_capitalpay_logging():
@@ -286,6 +339,7 @@ def _install_verbose_capitalpay_logging():
         url = f"{capitalpay.BASE_URL}/oauth/generate/token"
         payload = {"key": capitalpay.API_KEY, "secret": capitalpay.API_SECRET}
         headers = {"Content-Type": "application/json"}
+        _log_session_start("CAPITALPAY TOKEN", f"POST {url}")
         _log_block("OUTGOING CAPITALPAY TOKEN REQUEST", [("POST", url), ("Headers", headers), ("JSON", payload)])
         try:
             resp = capitalpay.requests.post(url, json=payload, headers=headers, timeout=30)
@@ -295,20 +349,21 @@ def _install_verbose_capitalpay_logging():
                 response_body = resp.json()
             except ValueError:
                 pass
-            _log_block(
-                "INCOMING CAPITALPAY TOKEN RESPONSE",
-                [
-                    ("Status", f"{resp.status_code} {resp.reason}"),
-                    ("Headers", dict(resp.headers)),
-                    ("Body", response_body),
-                ],
-            )
+            _log_response_marker(f"HTTP {resp.status_code} {resp.reason}")
+            for label, value in [
+                ("Status", f"{resp.status_code} {resp.reason}"),
+                ("Headers", dict(resp.headers)),
+                ("Body", response_body),
+            ]:
+                _log_detail_block(label, value)
             resp.raise_for_status()
             token = resp.json().get("token")
             print(f"  [TOKEN] Received bearer token: {_mask(token)}")
+            _log_session_end("CAPITALPAY TOKEN", "OK")
             return token
         except Exception as exc:
             print(f"  [TOKEN] Failed: {exc}")
+            _log_session_end("CAPITALPAY TOKEN", "FAILED")
             return original_generate_token()
 
     def verbose_create_invoice(token, payload):
@@ -318,9 +373,11 @@ def _install_verbose_capitalpay_logging():
             "Content-Type": "application/json",
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
         }
+        _log_session_start("CAPITALPAY INVOICE", f"POST {url}")
         _log_block(
             "OUTGOING CAPITALPAY INVOICE REQUEST",
             [("POST", url), ("Headers", headers), ("JSON", payload)],
+            payload_kind="request",
         )
         try:
             resp = capitalpay.requests.post(url, headers=headers, json=payload, timeout=30)
@@ -330,20 +387,20 @@ def _install_verbose_capitalpay_logging():
                 response_body = resp.json()
             except ValueError:
                 pass
-            _log_block(
-                "INCOMING CAPITALPAY INVOICE RESPONSE",
-                [
-                    ("Status", f"{resp.status_code} {resp.reason}"),
-                    ("Headers", dict(resp.headers)),
-                    ("Body", response_body),
-                ],
-            )
+            _log_response_marker(f"HTTP {resp.status_code} {resp.reason}")
+            for label, value in [
+                ("Status", f"{resp.status_code} {resp.reason}"),
+                ("Headers", dict(resp.headers)),
+                ("Body", response_body),
+            ]:
+                _log_detail_block(label, value)
             resp.raise_for_status()
 
             content_type = (resp.headers.get("Content-Type") or "").lower()
             stripped = text.lstrip()
             if "text/html" in content_type or stripped.startswith(("<!DOCTYPE", "<html")):
                 html_text = capitalpay.normalize_checkout_html(text)
+                _log_session_end("CAPITALPAY INVOICE", "OK (HTML)")
                 return {
                     "kind": "html",
                     "html": html_text,
@@ -355,37 +412,44 @@ def _install_verbose_capitalpay_logging():
             except ValueError:
                 if stripped.startswith("<"):
                     html_text = capitalpay.normalize_checkout_html(text)
+                    _log_session_end("CAPITALPAY INVOICE", "OK (HTML)")
                     return {
                         "kind": "html",
                         "html": html_text,
                         "invoice_number": capitalpay.extract_invoice_number(html_text),
                     }
                 raise
+            _log_session_end("CAPITALPAY INVOICE", "OK")
             return {"kind": "json", "data": data}
         except Exception as exc:
             print(f"  [INVOICE] Failed after logged request/response: {exc}")
+            _log_session_end("CAPITALPAY INVOICE", "FAILED")
             raise
 
     def verbose_fetch_checkout_page(params):
+        _log_session_start("CAPITALPAY CHECKOUT PAGE", f"POST {capitalpay.CHECKOUT_URL}")
         _log_block(
             "OUTGOING CAPITALPAY CHECKOUT PAGE REQUEST",
             [("POST", capitalpay.CHECKOUT_URL), ("Form Data", params)],
+            payload_kind="request",
         )
         try:
             resp = capitalpay.requests.post(capitalpay.CHECKOUT_URL, data=params, timeout=30)
-            _log_block(
-                "INCOMING CAPITALPAY CHECKOUT PAGE RESPONSE",
-                [
-                    ("Status", f"{resp.status_code} {resp.reason}"),
-                    ("Headers", dict(resp.headers)),
-                    ("HTML Preview", resp.text or ""),
-                ],
-            )
+            _log_response_marker(f"HTTP {resp.status_code} {resp.reason}")
+            for label, value in [
+                ("Status", f"{resp.status_code} {resp.reason}"),
+                ("Headers", dict(resp.headers)),
+                ("HTML Preview", resp.text or ""),
+            ]:
+                _log_detail_block(label, value)
             if not resp.ok:
+                _log_session_end("CAPITALPAY CHECKOUT PAGE", "FAILED")
                 raise RuntimeError(f"Checkout error ({resp.status_code}): {resp.text[:300]}")
+            _log_session_end("CAPITALPAY CHECKOUT PAGE", "OK")
             return capitalpay.normalize_checkout_html(resp.text)
         except Exception as exc:
             print(f"  [CHECKOUT PAGE] Failed after logged request/response: {exc}")
+            _log_session_end("CAPITALPAY CHECKOUT PAGE", "FAILED")
             return original_fetch_checkout_page(params)
 
     capitalpay.generate_token = verbose_generate_token
@@ -576,6 +640,22 @@ def action_btn(label, btn_id, color=RED):
 
 
 def line_color(line):
+    if "SESSION START" in line:
+        return ACC2
+    if "SESSION END" in line:
+        return GREEN
+    if ">>> REQUEST" in line:
+        return ACC2
+    if "<<< RESPONSE" in line:
+        return GREEN
+    if line.strip() == LOG_RULE or (len(line.strip()) >= 20 and set(line.strip()) == {"="}):
+        return BORD
+    if "###" in line:
+        return PURP
+    if REQUEST_PAYLOAD in line:
+        return ACC2
+    if IPN_PAYLOAD in line:
+        return IPN_BLUE
     if "Payload quality : GOOD" in line:
         return GREEN
     if "Payload quality : BAD" in line or "Payload quality : PARTIAL" in line:
@@ -606,13 +686,79 @@ def log_line_style(line):
         "padding": "2px 8px",
         "borderLeft": "3px solid transparent",
     }
-    if "------------------------------------------------------" in line:
+    stripped = line.strip()
+    if stripped == LOG_RULE or (len(stripped) >= 20 and set(stripped) == {"="}):
+        style.update(
+            {
+                "color": ACC,
+                "background": "#0f1218",
+                "borderBottom": "none",
+                "borderTop": f"2px solid {ACC}",
+                "lineHeight": "1.2",
+                "padding": "6px 8px",
+                "fontWeight": "700",
+            }
+        )
+    elif stripped == LOG_DIV or (len(stripped) >= 20 and set(stripped) == {"-"}):
         style.update(
             {
                 "color": BORD,
                 "background": "#11151d",
                 "borderBottom": "none",
                 "lineHeight": "1",
+            }
+        )
+    elif "SESSION START" in line:
+        style.update(
+            {
+                "background": "rgba(224,90,30,.18)",
+                "borderLeft": f"4px solid {ACC}",
+                "color": ACC2,
+                "fontWeight": "800",
+                "fontSize": "13px",
+                "padding": "8px 10px",
+            }
+        )
+    elif "SESSION END" in line:
+        style.update(
+            {
+                "background": "rgba(34,197,94,.14)",
+                "borderLeft": f"4px solid {GREEN}",
+                "color": GREEN,
+                "fontWeight": "800",
+                "fontSize": "13px",
+                "padding": "8px 10px",
+            }
+        )
+    elif ">>> REQUEST" in line:
+        style.update(
+            {
+                "background": "rgba(240,122,58,.20)",
+                "borderLeft": f"4px solid {ACC2}",
+                "color": ACC2,
+                "fontWeight": "800",
+                "fontSize": "12px",
+                "padding": "6px 10px",
+            }
+        )
+    elif "<<< RESPONSE" in line:
+        style.update(
+            {
+                "background": "rgba(34,197,94,.16)",
+                "borderLeft": f"4px solid {GREEN}",
+                "color": GREEN,
+                "fontWeight": "800",
+                "fontSize": "12px",
+                "padding": "6px 10px",
+            }
+        )
+    elif "###" in line:
+        style.update(
+            {
+                "background": "rgba(167,139,250,.12)",
+                "borderLeft": f"3px solid {PURP}",
+                "color": PURP,
+                "fontWeight": "700",
             }
         )
     elif "[BLOCKED]" in line or "Decision: DENY" in line:
@@ -642,7 +788,25 @@ def log_line_style(line):
                 "fontWeight": "700",
             }
         )
-    elif any(label in line for label in ("Raw Body:", "Parsed / Unpacked", "Headers:", "Request:", "Body:")):
+    elif REQUEST_PAYLOAD in line:
+        style.update(
+            {
+                "background": "rgba(240,122,58,.16)",
+                "borderLeft": f"3px solid {ACC2}",
+                "color": ACC2,
+                "fontWeight": "600",
+            }
+        )
+    elif IPN_PAYLOAD in line:
+        style.update(
+            {
+                "background": "rgba(96,165,250,.14)",
+                "borderLeft": f"3px solid {IPN_BLUE}",
+                "color": IPN_BLUE,
+                "fontWeight": "600",
+            }
+        )
+    elif any(label in line for label in ("Headers:", "Request:", "Body:")) and REQUEST_PAYLOAD not in line and IPN_PAYLOAD not in line:
         style.update(
             {
                 "background": "rgba(37,43,56,.45)",
@@ -809,6 +973,12 @@ def logs_layout():
                         {"label": "VALID hashes", "value": "VALID"},
                         {"label": "INVALID hashes", "value": "INVALID"},
                         {"label": "Webhook hits", "value": "WEBHOOK"},
+                        {"label": "Session starts", "value": "SESSION START"},
+                        {"label": "Requests", "value": ">>> REQUEST"},
+                        {"label": "Responses", "value": "<<< RESPONSE"},
+                        {"label": "Session ends", "value": "SESSION END"},
+                        {"label": "Request payloads (orange)", "value": REQUEST_PAYLOAD},
+                        {"label": "IPN payloads (blue)", "value": IPN_PAYLOAD},
                         {"label": "Checkout only", "value": "CHECKOUT"},
                         {"label": "IP events", "value": "[IP]"},
                         {"label": "Bad payloads", "value": "Payload quality : BAD"},
@@ -1461,7 +1631,10 @@ input:focus{border-color:var(--accent)}
 .section-title{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);margin:20px 0 10px;padding-top:4px;border-top:1px solid var(--border)}
 .hint{font-size:11px;color:var(--muted);line-height:1.5;margin-top:6px}
 .settlement-panel{background:#12151c;border:1px solid var(--border);border-radius:var(--r);padding:14px;margin-top:8px}
-.settlement-panel.hidden{display:none}
+.settlement-panel.hidden{display:none !important}
+.settlement-status{display:inline-block;margin-top:8px;font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;letter-spacing:.04em}
+.settlement-status.off{background:rgba(107,114,128,.18);color:var(--muted);border:1px solid var(--border)}
+.settlement-status.on{background:rgba(34,197,94,.12);color:var(--success);border:1px solid rgba(34,197,94,.35)}
 select{width:100%;background:#1e2330;border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;padding:10px 13px;outline:none}
 select:focus{border-color:var(--accent)}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;margin-right:7px;vertical-align:middle}
@@ -1496,18 +1669,19 @@ select:focus{border-color:var(--accent)}
       <div class="field">
         <label>Require settlement</label>
         <select name="require_settlement" id="requireSettlement">
-          <option value="false" selected>false — full amount stays on merchant account {{ account_id }}</option>
-          <option value="true">true — split funds using settlements[] below</option>
+          <option value="false" selected>false</option>
+          <option value="true">true</option>
         </select>
+        <div class="settlement-status off" id="settlementStatus">Settlement OFF — require_settlement=false (fields hidden)</div>
         <div class="hint">
-          <strong>false:</strong> payment is credited to your main CapitalPay account only; no <code>settlements</code> array is sent.<br/>
-          <strong>true:</strong> CapitalPay routes the amount per <code>settlements</code> (account number, description, value). Does not replace IPN to <code>/notify</code>.
+          Select <strong>true</strong> to show settlement fields and send <code>require_settlement: "true"</code> with a <code>settlements[]</code> array.<br/>
+          Select <strong>false</strong> (default) to keep settlement off — fields stay hidden and invoice uses <code>require_settlement: "false"</code> only.
         </div>
       </div>
-      <div class="settlement-panel hidden" id="settlementPanel">
-        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number"/></div>
-        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account"/></div>
-        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount"/></div>
+      <div class="settlement-panel hidden" id="settlementPanel" aria-hidden="true">
+        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number" disabled/></div>
+        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account" disabled/></div>
+        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount" disabled/></div>
       </div>
       <div class="field"><label>Callback URL (on success)</label><input name="callback_url" type="url" value="{{ callback_url }}" placeholder="https://yoursite.com/success"/></div>
       <div class="field"><label>Notification URL (IPN) *</label><input name="notification_url" id="notif-url" type="url" value="{{ notification_url }}" required/></div>
@@ -1525,16 +1699,26 @@ const settlementPanel=document.getElementById('settlementPanel');
 const settlementAccount=document.getElementById('settlementAccount');
 const settlementDesc=document.getElementById('settlementDesc');
 const settlementValue=document.getElementById('settlementValue');
+const settlementStatus=document.getElementById('settlementStatus');
+const settlementFields=[settlementAccount,settlementDesc,settlementValue];
 function setStatus(msg,type){sb.className='status show '+type;sb.innerHTML=msg;}
 function syncSettlementPanel(){
   const enabled=requireSettlement.value==='true';
   settlementPanel.classList.toggle('hidden',!enabled);
-  settlementAccount.required=enabled;
-  settlementDesc.required=enabled;
-  if(!enabled){
-    settlementAccount.value='';
-    settlementDesc.value='';
-    settlementValue.value='';
+  settlementPanel.setAttribute('aria-hidden',enabled?'false':'true');
+  settlementFields.forEach(function(field){
+    field.disabled=!enabled;
+    field.required=false;
+  });
+  if(enabled){
+    settlementAccount.required=true;
+    settlementDesc.required=true;
+    settlementStatus.className='settlement-status on';
+    settlementStatus.textContent='Settlement ON — require_settlement=true (fill fields below)';
+  }else{
+    settlementFields.forEach(function(field){ field.value=''; });
+    settlementStatus.className='settlement-status off';
+    settlementStatus.textContent='Settlement OFF — require_settlement=false (fields hidden)';
   }
 }
 requireSettlement.addEventListener('change',syncSettlementPanel);
@@ -1548,13 +1732,17 @@ form.addEventListener('submit',async function(e){
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Creating Invoice...';
   setStatus('Generating token and creating invoice. Please wait...','info');
+  const settlementOn=requireSettlement.value==='true';
   const data=Object.fromEntries(new FormData(form).entries());
   data.currency='TZS';
-  data.require_settlement=requireSettlement.value==='true'?'true':'false';
-  if(data.require_settlement==='false'){
-    delete data.settlement_account_number;
-    delete data.settlement_desc;
-    delete data.settlement_value;
+  data.require_settlement=settlementOn?'true':'false';
+  delete data.settlement_account_number;
+  delete data.settlement_desc;
+  delete data.settlement_value;
+  if(settlementOn){
+    data.settlement_account_number=settlementAccount.value.trim();
+    data.settlement_desc=settlementDesc.value.trim();
+    if(settlementValue.value.trim()) data.settlement_value=settlementValue.value.trim();
   }
   try{
     const res=await fetch('/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
@@ -1589,24 +1777,17 @@ def log_checkout_request():
         return None
     data = request.get_json(silent=True) or {}
     raw_body = request.get_data(as_text=True) or ""
-    print("")
-    print("-" * 54)
-    print("  INCOMING BROWSER CHECKOUT REQUEST")
-    print("-" * 54)
-    print("  Request:")
-    print("    POST /checkout")
+    _log_session_start("BROWSER CHECKOUT", "POST /checkout")
+    _log_request_marker("Browser form submission")
+    print("  Method: POST /checkout")
     print("  Headers:")
     for key, value in _redact(dict(request.headers)).items():
         print(f"    {key}: {value}")
-    print("  Raw Body:")
-    for line in _pretty(raw_body).splitlines() or [""]:
-        print(f"    {line}")
-    print("  Parsed JSON:")
-    for line in _pretty(data).splitlines() or [""]:
-        print(f"    {line}")
-    print("-" * 54)
-    print("  CHECKOUT SUMMARY")
-    print("-" * 54)
+    print(f"  {REQUEST_PAYLOAD} Raw Body (checkout request):")
+    _print_payload_lines(raw_body, "request")
+    print(f"  {REQUEST_PAYLOAD} Parsed JSON (checkout request):")
+    _print_payload_lines(data, "request")
+    _log_summary("CHECKOUT REQUEST SUMMARY")
     print(f"  Customer   : {data.get('name', '')} | {data.get('msisdn', '')} | {data.get('email', '')}")
     print(f"  Bill ref   : {data.get('bill_ref', '')}")
     print(f"  Amount     : {data.get('amount', '')} TZS")
@@ -1620,17 +1801,14 @@ def log_checkout_request():
     print(f"  Notif URL  : {data.get('notification_url', '')}")
     print(f"  CapitalPay will POST notifications to: {data.get('notification_url', '')}")
     print(f"  CapitalPay success callback URL     : {data.get('callback_url', '')}")
-    print("-" * 54)
     return None
 
 
 @server.after_request
 def log_checkout_response(response):
     if request.path == "/checkout" and request.method == "POST":
-        print("")
-        print("-" * 54)
-        print("  OUTGOING BROWSER CHECKOUT RESPONSE")
-        print("-" * 54)
+        outcome = "OK" if response.status_code < 400 else "ERROR"
+        _log_response_marker(f"HTTP {response.status_code}", "to browser")
         print(f"  Status: {response.status_code}")
         print("  Headers:")
         for key, value in dict(response.headers).items():
@@ -1639,7 +1817,7 @@ def log_checkout_response(response):
         print("  Body:")
         for line in _pretty(body).splitlines() or [""]:
             print(f"    {line}")
-        print("-" * 54)
+        _log_session_end("BROWSER CHECKOUT", outcome)
     return response
 
 
@@ -1665,13 +1843,9 @@ server.view_functions["index"] = index
 def payment_callback():
     payload, raw_body = _request_payload_parts()
     event = _record_callback_event(payload, raw_body)
-    sep = "-" * 54
-    print("")
-    print(sep)
-    print("  INCOMING CALLBACK  /callback")
-    print(sep)
-    print("  Request:")
-    print(f"    {request.method} {request.path}")
+    _log_session_start("BROWSER CALLBACK", f"{request.method} /callback")
+    _log_request_marker("User redirect after payment")
+    print(f"  Method: {request.method} {request.path}")
     print(f"  Callback URL hit: {request.url}")
     print("  Headers:")
     for key, value in _redact(dict(request.headers)).items():
@@ -1682,16 +1856,13 @@ def payment_callback():
     print("  Unpacked Payload:")
     for line in _pretty(payload).splitlines() or [""]:
         print(f"    {line}")
-    print(sep)
-    print("  CALLBACK SUMMARY")
-    print(sep)
+    _log_summary("CALLBACK PARSED SUMMARY")
     print(f"  Timestamp  : {event['received_at']}")
     print(f"  Source IP  : {event['ip_address']}")
     print(f"  Invoice    : {event['invoice_number']}  (ref: {event['client_invoice_ref']})")
     print(f"  Status     : {event['status'].upper()}")
     print(f"  Amount paid: {event['amount_paid']} {event['currency']}")
     print("  Saved to Monitor as payment_channel=CALLBACK")
-    print(sep)
 
     response = {
         "ok": True,
@@ -1703,6 +1874,8 @@ def payment_callback():
         "amount_paid": event["amount_paid"],
     }
     if request.method == "GET" and "text/html" in (request.headers.get("Accept") or ""):
+        _log_response_marker("HTTP 200", "HTML confirmation page to browser")
+        _log_session_end("BROWSER CALLBACK", "CAPTURED")
         return render_template_string(
             """
             <!doctype html>
@@ -1719,6 +1892,9 @@ def payment_callback():
             invoice=event["invoice_number"] or "-",
             ref=event["client_invoice_ref"] or "-",
         )
+    _log_response_marker("HTTP 200", "JSON to client")
+    _log_detail_block("Body", response)
+    _log_session_end("BROWSER CALLBACK", "CAPTURED")
     return jsonify(response)
 
 
@@ -1730,24 +1906,18 @@ def payment_notify():
 
     payload_parts, raw_body = _request_payload_parts()
     source_ip = notifications.get_client_ip(request)
-    sep = "-" * 54
-    print("")
-    print(sep)
-    print("  INCOMING WEBHOOK  /notify")
-    print(sep)
-    print("  Request:")
-    print(f"    {request.method} {request.path}")
+    _log_session_start("BANK IPN /notify", f"{request.method} {request.path}")
+    _log_request_marker("Notification IPN from CapitalPay / bank")
+    print(f"  Method: {request.method} {request.path}")
     print(f"  CapitalPay notification URL hit: {request.url}")
     print(f"  Expected notification URL      : {capitalpay.default_notification_url()}")
     print("  Headers:")
     for key, value in _redact(dict(request.headers)).items():
         print(f"    {key}: {value}")
-    print("  Raw Body:")
-    for line in _pretty(raw_body).splitlines() or [""]:
-        print(f"    {line}")
-    print("  Parsed / Unpacked Notification Payload:")
-    for line in _pretty(payload_parts).splitlines() or [""]:
-        print(f"    {line}")
+    print(f"  {IPN_PAYLOAD} Raw Body (notification IPN from bank):")
+    _print_payload_lines(raw_body, "ipn")
+    print(f"  {IPN_PAYLOAD} Parsed notification IPN payload:")
+    _print_payload_lines(payload_parts, "ipn")
     print(f"  Source IP candidate: {source_ip}")
     allowlist_note = (
         "disabled — all IPs allowed"
@@ -1761,9 +1931,7 @@ def payment_notify():
         if not CAPITALPAY_ALLOWED_IPS
         else ("on allowlist" if event.get("ip_allowed", True) else "not on allowlist (still recorded)")
     )
-    print(sep)
-    print("  PARSED WEBHOOK SUMMARY")
-    print(sep)
+    _log_summary("IPN PARSED SUMMARY")
     print(f"  Timestamp       : {event['received_at']}")
     print(f"  Source IP       : {event['ip_address']}")
     print(f"  IP allowlist    : {ip_note}")
@@ -1775,24 +1943,26 @@ def payment_notify():
     print(f"  Amount paid     : {event['amount_paid']} {event['currency']}")
     print(f"  Channel         : {event['payment_channel']}")
     print(f"  Hash            : {'VALID' if event['valid_hash'] else 'INVALID'}")
-    print(f"  Responded HTTP 200 paid={event['status'] == 'settled'}")
-    print(sep)
 
-    return jsonify(
-        {
-            "ok": True,
-            "paid": event["status"] == "settled" and event.get("payload_quality") == "GOOD",
-            "status": event["status"],
-            "invoice_number": event["invoice_number"],
-            "client_invoice_ref": event["client_invoice_ref"],
-            "sender_ip": event["ip_address"],
-            "valid_hash": event["valid_hash"],
-            "payload_quality": event.get("payload_quality"),
-            "quality_issues": event.get("quality_issues", []),
-            "quality_missing": event.get("quality_missing", []),
-            "ip_allowed": event.get("ip_allowed", True),
-        }
-    )
+    api_response = {
+        "ok": True,
+        "paid": event["status"] == "settled" and event.get("payload_quality") == "GOOD",
+        "status": event["status"],
+        "invoice_number": event["invoice_number"],
+        "client_invoice_ref": event["client_invoice_ref"],
+        "sender_ip": event["ip_address"],
+        "valid_hash": event["valid_hash"],
+        "payload_quality": event.get("payload_quality"),
+        "quality_issues": event.get("quality_issues", []),
+        "quality_missing": event.get("quality_missing", []),
+        "ip_allowed": event.get("ip_allowed", True),
+    }
+    paid_flag = api_response["paid"]
+    _log_response_marker("HTTP 200", f"paid={paid_flag}")
+    _log_detail_block("Body", api_response)
+    _log_session_end("BANK IPN /notify", "RECORDED")
+
+    return jsonify(api_response)
 
 
 @server.route("/test-notify", methods=["POST"])
