@@ -20,9 +20,10 @@ capitalpay.LOCAL_PORT = int(os.environ.get("PORT", "5052"))
 
 HOST = os.environ.get("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{capitalpay.LOCAL_PORT}")
 VALID_USERS = {"CP": "CP123"}
+# Empty allowlist = accept and record traffic from any IP (current default).
 CAPITALPAY_ALLOWED_IPS = {
     ip.strip()
-    for ip in os.environ.get("CAPITALPAY_ALLOWED_IPS", "41.59.1.2").split(",")
+    for ip in os.environ.get("CAPITALPAY_ALLOWED_IPS", "").split(",")
     if ip.strip()
 }
 
@@ -1457,6 +1458,12 @@ input:focus{border-color:var(--accent)}
 .status.info{background:rgba(224,90,30,.12);border:1px solid rgba(224,90,30,.3);color:#f0a070}
 .status.success{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:var(--success)}
 .status.error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--error)}
+.section-title{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);margin:20px 0 10px;padding-top:4px;border-top:1px solid var(--border)}
+.hint{font-size:11px;color:var(--muted);line-height:1.5;margin-top:6px}
+.settlement-panel{background:#12151c;border:1px solid var(--border);border-radius:var(--r);padding:14px;margin-top:8px}
+.settlement-panel.hidden{display:none}
+select{width:100%;background:#1e2330;border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;padding:10px 13px;outline:none}
+select:focus{border-color:var(--accent)}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;margin-right:7px;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
@@ -1485,6 +1492,23 @@ input:focus{border-color:var(--accent)}
       </div>
       <div class="field"><label>Invoice / Bill Reference</label><input name="bill_ref" type="text" placeholder="INV-2026-001" required/></div>
       <div class="field"><label>Description</label><input name="desc" type="text" placeholder="Payment description" required/></div>
+      <div class="section-title">Settlement (items.require_settlement)</div>
+      <div class="field">
+        <label>Require settlement</label>
+        <select name="require_settlement" id="requireSettlement">
+          <option value="false" selected>false — full amount stays on merchant account {{ account_id }}</option>
+          <option value="true">true — split funds using settlements[] below</option>
+        </select>
+        <div class="hint">
+          <strong>false:</strong> payment is credited to your main CapitalPay account only; no <code>settlements</code> array is sent.<br/>
+          <strong>true:</strong> CapitalPay routes the amount per <code>settlements</code> (account number, description, value). Does not replace IPN to <code>/notify</code>.
+        </div>
+      </div>
+      <div class="settlement-panel hidden" id="settlementPanel">
+        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number"/></div>
+        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account"/></div>
+        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount"/></div>
+      </div>
       <div class="field"><label>Callback URL (on success)</label><input name="callback_url" type="url" value="{{ callback_url }}" placeholder="https://yoursite.com/success"/></div>
       <div class="field"><label>Notification URL (IPN) *</label><input name="notification_url" id="notif-url" type="url" value="{{ notification_url }}" required/></div>
       <button class="btn" type="submit" id="submitBtn">Proceed to Payment</button>
@@ -1496,14 +1520,42 @@ input:focus{border-color:var(--accent)}
 const form=document.getElementById('payForm');
 const btn=document.getElementById('submitBtn');
 const sb=document.getElementById('statusBox');
+const requireSettlement=document.getElementById('requireSettlement');
+const settlementPanel=document.getElementById('settlementPanel');
+const settlementAccount=document.getElementById('settlementAccount');
+const settlementDesc=document.getElementById('settlementDesc');
+const settlementValue=document.getElementById('settlementValue');
 function setStatus(msg,type){sb.className='status show '+type;sb.innerHTML=msg;}
+function syncSettlementPanel(){
+  const enabled=requireSettlement.value==='true';
+  settlementPanel.classList.toggle('hidden',!enabled);
+  settlementAccount.required=enabled;
+  settlementDesc.required=enabled;
+  if(!enabled){
+    settlementAccount.value='';
+    settlementDesc.value='';
+    settlementValue.value='';
+  }
+}
+requireSettlement.addEventListener('change',syncSettlementPanel);
+syncSettlementPanel();
 form.addEventListener('submit',async function(e){
   e.preventDefault();
+  if(requireSettlement.value==='true'&&(!settlementAccount.value.trim()||!settlementDesc.value.trim())){
+    setStatus('require_settlement is true — enter settlement account number and description.','error');
+    return;
+  }
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Creating Invoice...';
   setStatus('Generating token and creating invoice. Please wait...','info');
   const data=Object.fromEntries(new FormData(form).entries());
   data.currency='TZS';
+  data.require_settlement=requireSettlement.value==='true'?'true':'false';
+  if(data.require_settlement==='false'){
+    delete data.settlement_account_number;
+    delete data.settlement_desc;
+    delete data.settlement_value;
+  }
   try{
     const res=await fetch('/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const text=await res.text();
@@ -1514,8 +1566,11 @@ form.addEventListener('submit',async function(e){
       throw new Error(text || 'Server returned a non-JSON response');
     }
     if(!res.ok||json.error) throw new Error(json.error||'Server error');
+    const settlementNote=data.require_settlement==='true'
+      ? ' Settlement split enabled (require_settlement=true).'
+      : ' No settlement split (require_settlement=false).';
     if(json.checkout_url){
-      setStatus('Invoice <strong>'+(json.invoice_ref||data.bill_ref)+'</strong> created. Opening checkout...','success');
+      setStatus('Invoice <strong>'+(json.invoice_ref||data.bill_ref)+'</strong> created.'+settlementNote+' Opening checkout...','success');
       window.open(json.checkout_url,'_blank','noopener,noreferrer');
     } else {
       setStatus('Invoice created. Reference: <strong>'+(json.invoice_ref||data.bill_ref)+'</strong>','success');
@@ -1555,6 +1610,12 @@ def log_checkout_request():
     print(f"  Customer   : {data.get('name', '')} | {data.get('msisdn', '')} | {data.get('email', '')}")
     print(f"  Bill ref   : {data.get('bill_ref', '')}")
     print(f"  Amount     : {data.get('amount', '')} TZS")
+    require_settlement = str(data.get("require_settlement", "false")).lower() in {"true", "1", "yes"}
+    print(f"  Settlement : require_settlement={'true' if require_settlement else 'false'}")
+    if require_settlement:
+        print(f"  Settle acct : {data.get('settlement_account_number', '')}")
+        print(f"  Settle desc : {data.get('settlement_desc', '')}")
+        print(f"  Settle value: {data.get('settlement_value', '') or data.get('amount', '')} TZS")
     print(f"  Callback   : {data.get('callback_url', '')}")
     print(f"  Notif URL  : {data.get('notification_url', '')}")
     print(f"  CapitalPay will POST notifications to: {data.get('notification_url', '')}")
@@ -1688,9 +1749,18 @@ def payment_notify():
     for line in _pretty(payload_parts).splitlines() or [""]:
         print(f"    {line}")
     print(f"  Source IP candidate: {source_ip}")
-    print(f"  Allowlist         : {', '.join(sorted(CAPITALPAY_ALLOWED_IPS)) or '(disabled)'}")
+    allowlist_note = (
+        "disabled — all IPs allowed"
+        if not CAPITALPAY_ALLOWED_IPS
+        else ", ".join(sorted(CAPITALPAY_ALLOWED_IPS))
+    )
+    print(f"  Allowlist         : {allowlist_note}")
     event = notifications.record_notification(request, capitalpay.API_SECRET, CAPITALPAY_ALLOWED_IPS)
-    ip_note = "ALLOWED" if event.get("ip_allowed", True) else "UNKNOWN IP (still recorded)"
+    ip_note = (
+        "all IPs allowed"
+        if not CAPITALPAY_ALLOWED_IPS
+        else ("on allowlist" if event.get("ip_allowed", True) else "not on allowlist (still recorded)")
+    )
     print(sep)
     print("  PARSED WEBHOOK SUMMARY")
     print(sep)
@@ -1786,7 +1856,7 @@ if __name__ == "__main__":
     print(f"  Dashboard   ->  {HOST}/dash/   (user: CP  pass: CP123)")
     print(f"  Webhook     ->  {HOST}/notify")
     print(sep)
-    print("  Every POST to /notify is recorded with full payload + GOOD/BAD report")
+    print("  Every POST to /notify is recorded (all IPs allowed unless CAPITALPAY_ALLOWED_IPS is set)")
     print(sep)
     print("")
     if not os.environ.get("RENDER_EXTERNAL_URL"):

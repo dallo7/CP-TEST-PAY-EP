@@ -537,18 +537,17 @@ def checkout():
     settlement_account_number = (data.get("settlement_account_number") or "").strip()
     settlement_desc = (data.get("settlement_desc") or "").strip()
     settlement_value = (data.get("settlement_value") or "").strip()
+    require_settlement_raw = str(data.get("require_settlement", "false")).strip().lower()
+    require_settlement = require_settlement_raw in {"true", "1", "yes"}
 
     account_id_str = str(ACCOUNT_ID)
     amount_str = f"{float(amount):.2f}"
-    settlement_requested = any(
-        [settlement_account_number, settlement_desc, settlement_value]
-    )
-    if settlement_requested and not (settlement_account_number and settlement_desc):
+    if require_settlement and not (settlement_account_number and settlement_desc):
         return jsonify(
             {
                 "error": (
-                    "Settlement account number and settlement description are "
-                    "required when using settlement."
+                    "require_settlement is true — settlement account number and "
+                    "settlement description are required."
                 )
             }
         ), 400
@@ -559,11 +558,10 @@ def checkout():
         "item_ref": bill_ref,
         "price": amount_str,
         "quantity": "1",
-        "require_settlement": "false",
+        "require_settlement": "true" if require_settlement else "false",
     }
-    if settlement_requested:
+    if require_settlement:
         settlement_value_str = f"{float(settlement_value or amount_str):.2f}"
-        invoice_item["require_settlement"] = "true"
         invoice_item["settlements"] = [
             {
                 "account_number": settlement_account_number,
