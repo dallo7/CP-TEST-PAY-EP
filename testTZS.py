@@ -1581,7 +1581,6 @@ def switch_tab(_, __, current):
     Output("s-bad", "children"),
     Output("s-settled", "children"),
     Output("s-amount", "children"),
-    Output("cp-outbound-panel", "children"),
     Output("m-feed", "children"),
     Output("ip-table", "children"),
     Output("ip-count", "children"),
@@ -1595,6 +1594,23 @@ def switch_tab(_, __, current):
     prevent_initial_call=False,
 )
 def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
+    try:
+        return _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f)
+    except Exception as exc:
+        print(f"[MONITOR] refresh_monitor failed: {exc}")
+        return (
+            "0",
+            "0",
+            "0",
+            "0",
+            "0.00",
+            html.Div(f"Monitor error: {exc}", style={"color": RED, "padding": "12px"}),
+            ip_table([]),
+            "0 IPs observed",
+        )
+
+
+def _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f):
     ctx = callback_context
     if ctx.triggered:
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
@@ -1648,11 +1664,25 @@ def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
         str(len(bad)),
         str(len(settled)),
         f"{paid:,.2f}",
-        cp_outbound_panel(),
         event_feed(filtered),
         ip_table(ips),
         f"{len(ips)} IP{'s' if len(ips) != 1 else ''} observed",
     )
+
+
+@app.callback(
+    Output("cp-outbound-panel", "children"),
+    Input("interval", "n_intervals"),
+    Input("btn-clear-notif", "n_clicks"),
+    Input("btn-test-event", "n_clicks"),
+    prevent_initial_call=False,
+)
+def refresh_cp_outbound_panel(_, __, ___):
+    try:
+        return cp_outbound_panel()
+    except Exception as exc:
+        print(f"[MONITOR] cp_outbound_panel failed: {exc}")
+        return html.Div(f"Outbound panel error: {exc}", style={"color": RED, "padding": "12px"})
 
 
 @app.callback(
