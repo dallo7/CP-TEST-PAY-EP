@@ -10,6 +10,7 @@ from typing import Any
 
 
 DB_PATH = os.environ.get("CAPITALPAY_NOTIFICATION_DB", "capitalpay_notifications.sqlite3")
+ONE_TIME_RESET_KEY = "dashboard_one_time_reset_v1"
 
 
 def utc_now() -> str:
@@ -70,6 +71,14 @@ def init_db(conn=None):
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
                 hit_count INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
             """
         )
@@ -403,6 +412,24 @@ def clear_notifications():
     with get_db() as db:
         db.execute("DELETE FROM notifications")
         db.execute("DELETE FROM capitalpay_ips")
+
+
+def one_time_startup_reset() -> bool:
+    """Clear stored notifications once, then keep all future traffic permanently."""
+    with get_db() as db:
+        row = db.execute(
+            "SELECT value FROM app_meta WHERE key = ?",
+            (ONE_TIME_RESET_KEY,),
+        ).fetchone()
+        if row:
+            return False
+        db.execute("DELETE FROM notifications")
+        db.execute("DELETE FROM capitalpay_ips")
+        db.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
+            (ONE_TIME_RESET_KEY, utc_now()),
+        )
+    return True
 
 
 def inject_test():

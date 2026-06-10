@@ -486,36 +486,18 @@ def _install_verbose_capitalpay_logging():
 _install_verbose_capitalpay_logging()
 
 
-def _reset_metrics_on_startup():
-    if os.environ.get("CAPITALPAY_RESET_METRICS_ON_START", "true").lower() not in {
-        "true",
-        "1",
-        "yes",
-    }:
-        return
+def _run_one_time_startup_reset():
     try:
-        notifications.clear_notifications()
-        LAST_CP_OUTBOUND.update(
-            {
-                "at": None,
-                "invoice_url": None,
-                "invoice_request": None,
-                "invoice_response": None,
-                "checkout_page_url": None,
-                "checkout_params": None,
-            }
-        )
-        while not LOG_QUEUE.empty():
-            try:
-                LOG_QUEUE.get_nowait()
-            except queue.Empty:
-                break
-        print("[METRICS] Dashboard counters reset to zero on startup")
+        if notifications.one_time_startup_reset():
+            print(
+                "[METRICS] One-time dashboard reset complete — "
+                "all future /notify traffic will be stored permanently"
+            )
     except Exception as exc:
-        print(f"[METRICS] Startup reset skipped: {exc}")
+        print(f"[METRICS] One-time reset skipped: {exc}")
 
 
-_reset_metrics_on_startup()
+_run_one_time_startup_reset()
 
 
 # Gunicorn uses this variable on Render: gunicorn testTZS:server
