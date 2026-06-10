@@ -619,6 +619,10 @@ def checkout():
             "checkout_url": checkout_url,
             "api_response": api_data,
             "settlement_sent": invoice_item.get("settlements", []),
+            "cp_invoice_url": f"{BASE_URL}/invoice/create",
+            "cp_invoice_request": invoice_payload,
+            "cp_checkout_page_url": CHECKOUT_URL,
+            "cp_checkout_params": checkout_params,
         }
     )
 

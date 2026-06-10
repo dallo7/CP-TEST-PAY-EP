@@ -44,7 +44,22 @@ IPN_PAYLOAD = "[IPN-PAYLOAD]"
 LOG_RULE = "=" * 72
 LOG_DIV = "-" * 72
 
+LAST_CP_OUTBOUND: dict = {
+    "at": None,
+    "invoice_url": None,
+    "invoice_request": None,
+    "invoice_response": None,
+    "checkout_page_url": None,
+    "checkout_params": None,
+}
+
 LOG_QUEUE: queue.Queue[str] = queue.Queue(maxsize=500)
+
+
+def _record_cp_outbound(**fields):
+    LAST_CP_OUTBOUND.update(fields)
+    if fields.get("at") is None:
+        LAST_CP_OUTBOUND["at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class TeeLogger:
@@ -374,6 +389,12 @@ def _install_verbose_capitalpay_logging():
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
         }
         _log_session_start("CAPITALPAY INVOICE", f"POST {url}")
+        _record_cp_outbound(
+            at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            invoice_url=url,
+            invoice_request=_redact(payload),
+            invoice_response=None,
+        )
         _log_block(
             "OUTGOING CAPITALPAY INVOICE REQUEST",
             [("POST", url), ("Headers", headers), ("JSON", payload)],
@@ -394,6 +415,7 @@ def _install_verbose_capitalpay_logging():
                 ("Body", response_body),
             ]:
                 _log_detail_block(label, value)
+            _record_cp_outbound(invoice_response=_redact(response_body))
             resp.raise_for_status()
 
             content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -427,6 +449,10 @@ def _install_verbose_capitalpay_logging():
             raise
 
     def verbose_fetch_checkout_page(params):
+        _record_cp_outbound(
+            checkout_page_url=capitalpay.CHECKOUT_URL,
+            checkout_params=_redact(params),
+        )
         _log_session_start("CAPITALPAY CHECKOUT PAGE", f"POST {capitalpay.CHECKOUT_URL}")
         _log_block(
             "OUTGOING CAPITALPAY CHECKOUT PAGE REQUEST",
@@ -890,6 +916,7 @@ def monitor_layout():
                 action_btn("Inject test event", "btn-test-event", ACC2),
                 action_btn("Clear all", "btn-clear-notif", RED),
             ),
+            html.Div(id="cp-outbound-panel"),
             html.Div(id="m-feed"),
             html.Div(
                 style={"marginTop": "36px"},
@@ -1056,7 +1083,7 @@ def captured_payload_panel(ev):
         },
         children=[
             html.Summary(
-                "Captured notification payload",
+                "Captured INBOUND payload (from bank / browser — not your CP invoice request)",
                 style={
                     "color": ACC2,
                     "fontSize": "12px",
@@ -1359,6 +1386,96 @@ def ip_table(ip_data):
     )
 
 
+def cp_outbound_panel():
+    box_style = {
+        "background": "#0a0c10",
+        "border": f"1px solid {BORD}",
+        "borderRadius": "10px",
+        "padding": "12px",
+        "color": ACC2,
+        "fontFamily": "'Fira Mono','Courier New',monospace",
+        "fontSize": "11px",
+        "lineHeight": "1.55",
+        "whiteSpace": "pre-wrap",
+        "wordBreak": "break-word",
+        "maxHeight": "360px",
+        "overflow": "auto",
+    }
+    if not LAST_CP_OUTBOUND.get("invoice_request"):
+        return html.Div(
+            style={
+                "background": SURF,
+                "border": f"1px solid {BORD}",
+                "borderRadius": "13px",
+                "padding": "16px 18px",
+                "marginBottom": "16px",
+            },
+            children=[
+                html.Div(
+                    "Last CapitalPay OUTBOUND request (invoice create)",
+                    style={"fontSize": "13px", "fontWeight": "700", "color": TEXT, "marginBottom": "6px"},
+                ),
+                html.P(
+                    "Run a checkout first. This shows the JSON body POSTed to CapitalPay /invoice/create — not inbound /notify or /callback traffic.",
+                    style={"fontSize": "12px", "color": MUTED, "margin": 0},
+                ),
+            ],
+        )
+
+    return html.Div(
+        style={
+            "background": SURF,
+            "border": f"1px solid {BORD}",
+            "borderRadius": "13px",
+            "padding": "14px 18px",
+            "marginBottom": "16px",
+        },
+        children=[
+            html.Div(
+                style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "alignItems": "center", "marginBottom": "10px"},
+                children=[
+                    html.Span(
+                        "Last CapitalPay OUTBOUND request",
+                        style={"fontSize": "13px", "fontWeight": "700", "color": TEXT},
+                    ),
+                    badge("TO CAPITALPAY", ACC2),
+                    html.Span(
+                        LAST_CP_OUTBOUND.get("at") or "-",
+                        style={"marginLeft": "auto", "fontSize": "11px", "color": MUTED},
+                    ),
+                ],
+            ),
+            html.P(
+                "Orange in Terminal Logs. This is what your server sends to CP to create the invoice — separate from empty inbound callback bodies.",
+                style={"fontSize": "11px", "color": MUTED, "margin": "0 0 10px"},
+            ),
+            html.Div("POST URL (invoice create)", style={"fontSize": "10px", "color": MUTED, "fontWeight": "700", "marginBottom": "4px"}),
+            html.Pre(LAST_CP_OUTBOUND.get("invoice_url") or "-", style={**box_style, "color": TEXT, "maxHeight": "80px"}),
+            html.Div("Request body JSON (cp_invoice_request)", style={"fontSize": "10px", "color": MUTED, "fontWeight": "700", "margin": "10px 0 4px"}),
+            html.Pre(_pretty(LAST_CP_OUTBOUND.get("invoice_request"), limit=12000), style=box_style),
+            html.Div("CapitalPay response body", style={"fontSize": "10px", "color": MUTED, "fontWeight": "700", "margin": "10px 0 4px"}),
+            html.Pre(
+                _pretty(LAST_CP_OUTBOUND.get("invoice_response") or {}, limit=8000),
+                style={**box_style, "color": GREEN, "maxHeight": "240px"},
+            ),
+            html.Details(
+                style={"marginTop": "10px"},
+                children=[
+                    html.Summary(
+                        "Checkout page form params (second POST to CapitalPay)",
+                        style={"color": ACC2, "fontSize": "12px", "fontWeight": "700", "cursor": "pointer"},
+                    ),
+                    html.Div(
+                        f"POST {LAST_CP_OUTBOUND.get('checkout_page_url') or capitalpay.CHECKOUT_URL}",
+                        style={"fontSize": "11px", "color": MUTED, "margin": "8px 0 4px"},
+                    ),
+                    html.Pre(_pretty(LAST_CP_OUTBOUND.get("checkout_params") or {}, limit=8000), style=box_style),
+                ],
+            ),
+        ],
+    )
+
+
 def shell_style(active):
     return {"display": "block" if active else "none"}
 
@@ -1464,6 +1581,7 @@ def switch_tab(_, __, current):
     Output("s-bad", "children"),
     Output("s-settled", "children"),
     Output("s-amount", "children"),
+    Output("cp-outbound-panel", "children"),
     Output("m-feed", "children"),
     Output("ip-table", "children"),
     Output("ip-count", "children"),
@@ -1530,6 +1648,7 @@ def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
         str(len(bad)),
         str(len(settled)),
         f"{paid:,.2f}",
+        cp_outbound_panel(),
         event_feed(filtered),
         ip_table(ips),
         f"{len(ips)} IP{'s' if len(ips) != 1 else ''} observed",
@@ -1757,11 +1876,13 @@ form.addEventListener('submit',async function(e){
     const settlementNote=data.require_settlement==='true'
       ? ' Settlement split enabled (require_settlement=true).'
       : ' No settlement split (require_settlement=false).';
+    const cpReq=json.cp_invoice_request?('<details style="margin-top:12px;text-align:left"><summary style="cursor:pointer;color:#f07a3a;font-weight:700">CapitalPay invoice request body (POST /invoice/create)</summary><pre style="margin-top:8px;padding:10px;background:#0a0c10;border:1px solid #252b38;border-radius:8px;overflow:auto;max-height:280px;font-size:11px;color:#f07a3a;white-space:pre-wrap">'+JSON.stringify(json.cp_invoice_request,null,2)+'</pre></details>'):'';
+    const cpForm=json.cp_checkout_params?('<details style="margin-top:8px;text-align:left"><summary style="cursor:pointer;color:#f07a3a;font-weight:700">Checkout page form params (POST PaymentAPI)</summary><pre style="margin-top:8px;padding:10px;background:#0a0c10;border:1px solid #252b38;border-radius:8px;overflow:auto;max-height:220px;font-size:11px;color:#f07a3a;white-space:pre-wrap">'+JSON.stringify(json.cp_checkout_params,null,2)+'</pre></details>'):'';
     if(json.checkout_url){
-      setStatus('Invoice <strong>'+(json.invoice_ref||data.bill_ref)+'</strong> created.'+settlementNote+' Opening checkout...','success');
+      setStatus('Invoice <strong>'+(json.invoice_ref||data.bill_ref)+'</strong> created.'+settlementNote+' Opening checkout...'+cpReq+cpForm,'success');
       window.open(json.checkout_url,'_blank','noopener,noreferrer');
     } else {
-      setStatus('Invoice created. Reference: <strong>'+(json.invoice_ref||data.bill_ref)+'</strong>','success');
+      setStatus('Invoice created. Reference: <strong>'+(json.invoice_ref||data.bill_ref)+'</strong>'+cpReq+cpForm,'success');
     }
   }catch(err){setStatus(err.message,'error');}
   finally{btn.disabled=false;btn.textContent='Proceed to Payment';}
@@ -1970,6 +2091,11 @@ def test_notify():
     event = notifications.inject_test()
     print(f"[MONITOR] Injected test event paid={event['status'] == 'settled'} ip={event['ip_address']}")
     return jsonify({"injected": 1, "event": event}), 200
+
+
+@server.route("/api/last-cp-outbound", methods=["GET"])
+def api_last_cp_outbound():
+    return jsonify(LAST_CP_OUTBOUND)
 
 
 @server.route("/api/notifications", methods=["GET"])
