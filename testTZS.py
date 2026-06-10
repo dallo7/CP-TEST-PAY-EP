@@ -486,6 +486,38 @@ def _install_verbose_capitalpay_logging():
 _install_verbose_capitalpay_logging()
 
 
+def _reset_metrics_on_startup():
+    if os.environ.get("CAPITALPAY_RESET_METRICS_ON_START", "true").lower() not in {
+        "true",
+        "1",
+        "yes",
+    }:
+        return
+    try:
+        notifications.clear_notifications()
+        LAST_CP_OUTBOUND.update(
+            {
+                "at": None,
+                "invoice_url": None,
+                "invoice_request": None,
+                "invoice_response": None,
+                "checkout_page_url": None,
+                "checkout_params": None,
+            }
+        )
+        while not LOG_QUEUE.empty():
+            try:
+                LOG_QUEUE.get_nowait()
+            except queue.Empty:
+                break
+        print("[METRICS] Dashboard counters reset to zero on startup")
+    except Exception as exc:
+        print(f"[METRICS] Startup reset skipped: {exc}")
+
+
+_reset_metrics_on_startup()
+
+
 # Gunicorn uses this variable on Render: gunicorn testTZS:server
 server = capitalpay.app
 server.secret_key = os.environ.get("FLASK_SECRET", "cp-secret-2026-ttcams")
@@ -524,7 +556,7 @@ def _rgba(hex_color, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def stat_card(label, value_id, color=TEXT):
+def stat_card(label, value_id, color=TEXT, initial="0"):
     return html.Div(
         style={
             "background": SURF,
@@ -546,7 +578,7 @@ def stat_card(label, value_id, color=TEXT):
                 },
             ),
             html.Div(
-                "-",
+                initial,
                 id=value_id,
                 style={"fontSize": "24px", "fontWeight": "700", "color": color, "lineHeight": "1"},
             ),
@@ -856,7 +888,7 @@ def monitor_layout():
                     stat_card("Good payloads", "s-good", GREEN),
                     stat_card("Bad / partial", "s-bad", RED),
                     stat_card("Settled", "s-settled", GREEN),
-                    stat_card("Total paid (TZS)", "s-amount"),
+                    stat_card("Total paid (TZS)", "s-amount", initial="0.00"),
                 ],
             ),
             filter_bar(
@@ -937,7 +969,7 @@ def monitor_layout():
                                     "color": TEXT,
                                 },
                             ),
-                            html.Span(id="ip-count", style={"fontSize": "12px", "color": MUTED}),
+                            html.Span("0 IPs observed", id="ip-count", style={"fontSize": "12px", "color": MUTED}),
                             html.Span(
                                 "Confirm with CapitalPay support",
                                 style={"marginLeft": "auto", "fontSize": "11px", "color": MUTED},
@@ -1013,7 +1045,7 @@ def logs_layout():
                     ],
                     style={"width": "180px", "fontSize": "12px"},
                 ),
-                html.Span(id="l-count", style={"color": MUTED, "fontSize": "12px", "marginLeft": "auto"}),
+                html.Span("0 lines", id="l-count", style={"color": MUTED, "fontSize": "12px", "marginLeft": "auto"}),
                 action_btn("Clear", "btn-clear-logs", RED),
             ),
             html.Div(
@@ -1133,20 +1165,78 @@ def captured_payload_panel(ev):
 def event_feed(events):
     if not events:
         return html.Div(
-            [
-                html.Div("No notifications yet", style={"fontSize": "18px", "marginBottom": "10px"}),
-                html.P(
-                    "Point your CapitalPay notification_url to /notify.",
-                    style={"fontSize": "13px", "color": MUTED},
-                ),
-            ],
             style={
                 "textAlign": "center",
-                "padding": "50px 20px",
-                "background": SURF,
-                "border": f"1px solid {BORD}",
+                "padding": "36px 24px 40px",
                 "borderRadius": "13px",
+                "border": f"1px solid {BORD}",
+                "background": (
+                    f"linear-gradient(145deg, rgba(96,165,250,.12) 0%, rgba(167,139,250,.10) 45%, "
+                    f"rgba(240,122,58,.08) 100%)"
+                ),
+                "boxShadow": "inset 0 0 0 1px rgba(96,165,250,.12)",
             },
+            children=[
+                html.Div(
+                    style={
+                        "display": "flex",
+                        "justifyContent": "center",
+                        "gap": "8px",
+                        "flexWrap": "wrap",
+                        "marginBottom": "18px",
+                    },
+                    children=[
+                        badge("No IPN received yet", IPN_BLUE),
+                        badge("Awaiting SETTLED", WARN),
+                        badge("require_settlement=true", PURP),
+                    ],
+                ),
+                html.Div(
+                    "No CapitalPay /notify traffic yet",
+                    style={
+                        "fontSize": "20px",
+                        "fontWeight": "700",
+                        "color": TEXT,
+                        "marginBottom": "10px",
+                        "letterSpacing": ".01em",
+                    },
+                ),
+                html.P(
+                    "Invoice creation succeeded, but CapitalPay has not POSTed a settlement IPN payload to your webhook yet.",
+                    style={"fontSize": "13px", "color": MUTED, "maxWidth": "520px", "margin": "0 auto 16px"},
+                ),
+                html.Div(
+                    style={
+                        "display": "inline-block",
+                        "textAlign": "left",
+                        "padding": "14px 18px",
+                        "borderRadius": "10px",
+                        "background": "rgba(10,12,16,.55)",
+                        "border": f"1px solid {BORD}",
+                        "marginBottom": "14px",
+                    },
+                    children=[
+                        html.Div("Expected IPN endpoint", style={"fontSize": "10px", "color": MUTED, "fontWeight": "700", "marginBottom": "6px"}),
+                        html.Code(
+                            "/notify",
+                            style={"color": IPN_BLUE, "fontSize": "13px", "fontWeight": "700"},
+                        ),
+                        html.Div(
+                            "When payment settles, CapitalPay should POST status, invoice_number, amount_paid, payment_reference, etc.",
+                            style={"fontSize": "11px", "color": MUTED, "marginTop": "8px", "maxWidth": "420px"},
+                        ),
+                    ],
+                ),
+                html.Div(
+                    style={"display": "flex", "justifyContent": "center", "gap": "10px", "flexWrap": "wrap"},
+                    children=[
+                        html.Span(
+                            "Tip: use Inject test event to preview a GOOD payload",
+                            style={"fontSize": "11px", "color": ACC2},
+                        ),
+                    ],
+                ),
+            ],
         )
 
     cards = []
@@ -1818,19 +1908,19 @@ select:focus{border-color:var(--accent)}
       <div class="field">
         <label>Settlement split (settlements[])</label>
         <select name="settlement_split" id="settlementSplit">
-          <option value="false">No — require_settlement true only</option>
-          <option value="true" selected>Yes — include settlements[]</option>
+          <option value="false" selected>No — require_settlement true only</option>
+          <option value="true">Yes — include settlements[]</option>
         </select>
-        <div class="settlement-status on" id="settlementStatus">require_settlement=true always — settlement split ON (fill fields below)</div>
+        <div class="settlement-status off" id="settlementStatus">require_settlement=true — no settlements[] split</div>
         <div class="hint">
           Every invoice sends <code>require_settlement: "true"</code>.<br/>
           Enable <strong>settlement split</strong> to also include a <code>settlements[]</code> array (account + description required).
         </div>
       </div>
-      <div class="settlement-panel" id="settlementPanel" aria-hidden="false">
-        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number" required/></div>
-        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account" required/></div>
-        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount"/></div>
+      <div class="settlement-panel hidden" id="settlementPanel" aria-hidden="true">
+        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number" disabled/></div>
+        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account" disabled/></div>
+        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount" disabled/></div>
       </div>
       <div class="field"><label>Callback URL (on success)</label><input name="callback_url" type="url" value="{{ callback_url }}" placeholder="https://yoursite.com/success"/></div>
       <div class="field"><label>Notification URL (IPN) *</label><input name="notification_url" id="notif-url" type="url" value="{{ notification_url }}" required/></div>

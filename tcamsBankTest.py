@@ -405,8 +405,8 @@ HTML = """
       <div class="field">
         <label>Settlement split (settlements[])</label>
         <select name="settlement_split" id="settlementSplit">
-          <option value="false">No — require_settlement true only</option>
-          <option value="true" selected>Yes — include settlements[]</option>
+          <option value="false" selected>No — require_settlement true only</option>
+          <option value="true">Yes — include settlements[]</option>
         </select>
         <div class="hint">Invoice items always send <code>require_settlement: "true"</code>. Enable split to also send a <code>settlements[]</code> array.</div>
       </div>
