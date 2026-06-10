@@ -1814,23 +1814,23 @@ select:focus{border-color:var(--accent)}
       </div>
       <div class="field"><label>Invoice / Bill Reference</label><input name="bill_ref" type="text" placeholder="INV-2026-001" required/></div>
       <div class="field"><label>Description</label><input name="desc" type="text" placeholder="Payment description" required/></div>
-      <div class="section-title">Settlement (items.require_settlement)</div>
+      <div class="section-title">Settlement</div>
       <div class="field">
-        <label>Require settlement</label>
-        <select name="require_settlement" id="requireSettlement">
-          <option value="false" selected>false</option>
-          <option value="true">true</option>
+        <label>Settlement split (settlements[])</label>
+        <select name="settlement_split" id="settlementSplit">
+          <option value="false">No — require_settlement true only</option>
+          <option value="true" selected>Yes — include settlements[]</option>
         </select>
-        <div class="settlement-status off" id="settlementStatus">Settlement OFF — require_settlement=false (fields hidden)</div>
+        <div class="settlement-status on" id="settlementStatus">require_settlement=true always — settlement split ON (fill fields below)</div>
         <div class="hint">
-          Select <strong>true</strong> to show settlement fields and send <code>require_settlement: "true"</code> with a <code>settlements[]</code> array.<br/>
-          Select <strong>false</strong> (default) to keep settlement off — fields stay hidden and invoice uses <code>require_settlement: "false"</code> only.
+          Every invoice sends <code>require_settlement: "true"</code>.<br/>
+          Enable <strong>settlement split</strong> to also include a <code>settlements[]</code> array (account + description required).
         </div>
       </div>
-      <div class="settlement-panel hidden" id="settlementPanel" aria-hidden="true">
-        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number" disabled/></div>
-        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account" disabled/></div>
-        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount" disabled/></div>
+      <div class="settlement-panel" id="settlementPanel" aria-hidden="false">
+        <div class="field"><label>Settlement account number *</label><input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number" required/></div>
+        <div class="field"><label>Settlement description *</label><input name="settlement_desc" id="settlementDesc" type="text" placeholder="e.g. Route fees to operations account" required/></div>
+        <div class="field"><label>Settlement value (TZS)</label><input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full invoice amount"/></div>
       </div>
       <div class="field"><label>Callback URL (on success)</label><input name="callback_url" type="url" value="{{ callback_url }}" placeholder="https://yoursite.com/success"/></div>
       <div class="field"><label>Notification URL (IPN) *</label><input name="notification_url" id="notif-url" type="url" value="{{ notification_url }}" required/></div>
@@ -1843,7 +1843,7 @@ select:focus{border-color:var(--accent)}
 const form=document.getElementById('payForm');
 const btn=document.getElementById('submitBtn');
 const sb=document.getElementById('statusBox');
-const requireSettlement=document.getElementById('requireSettlement');
+const settlementSplit=document.getElementById('settlementSplit');
 const settlementPanel=document.getElementById('settlementPanel');
 const settlementAccount=document.getElementById('settlementAccount');
 const settlementDesc=document.getElementById('settlementDesc');
@@ -1852,7 +1852,7 @@ const settlementStatus=document.getElementById('settlementStatus');
 const settlementFields=[settlementAccount,settlementDesc,settlementValue];
 function setStatus(msg,type){sb.className='status show '+type;sb.innerHTML=msg;}
 function syncSettlementPanel(){
-  const enabled=requireSettlement.value==='true';
+  const enabled=settlementSplit.value==='true';
   settlementPanel.classList.toggle('hidden',!enabled);
   settlementPanel.setAttribute('aria-hidden',enabled?'false':'true');
   settlementFields.forEach(function(field){
@@ -1863,32 +1863,33 @@ function syncSettlementPanel(){
     settlementAccount.required=true;
     settlementDesc.required=true;
     settlementStatus.className='settlement-status on';
-    settlementStatus.textContent='Settlement ON — require_settlement=true (fill fields below)';
+    settlementStatus.textContent='require_settlement=true — settlement split ON (fill fields below)';
   }else{
     settlementFields.forEach(function(field){ field.value=''; });
     settlementStatus.className='settlement-status off';
-    settlementStatus.textContent='Settlement OFF — require_settlement=false (fields hidden)';
+    settlementStatus.textContent='require_settlement=true — no settlements[] split';
   }
 }
-requireSettlement.addEventListener('change',syncSettlementPanel);
+settlementSplit.addEventListener('change',syncSettlementPanel);
 syncSettlementPanel();
 form.addEventListener('submit',async function(e){
   e.preventDefault();
-  if(requireSettlement.value==='true'&&(!settlementAccount.value.trim()||!settlementDesc.value.trim())){
-    setStatus('require_settlement is true — enter settlement account number and description.','error');
+  if(settlementSplit.value==='true'&&(!settlementAccount.value.trim()||!settlementDesc.value.trim())){
+    setStatus('Settlement split is enabled — enter settlement account number and description.','error');
     return;
   }
   btn.disabled=true;
   btn.innerHTML='<span class="spinner"></span>Creating Invoice...';
   setStatus('Generating token and creating invoice. Please wait...','info');
-  const settlementOn=requireSettlement.value==='true';
+  const splitOn=settlementSplit.value==='true';
   const data=Object.fromEntries(new FormData(form).entries());
   data.currency='TZS';
-  data.require_settlement=settlementOn?'true':'false';
+  data.require_settlement='true';
+  data.settlement_split=splitOn?'true':'false';
   delete data.settlement_account_number;
   delete data.settlement_desc;
   delete data.settlement_value;
-  if(settlementOn){
+  if(splitOn){
     data.settlement_account_number=settlementAccount.value.trim();
     data.settlement_desc=settlementDesc.value.trim();
     if(settlementValue.value.trim()) data.settlement_value=settlementValue.value.trim();
@@ -1903,9 +1904,9 @@ form.addEventListener('submit',async function(e){
       throw new Error(text || 'Server returned a non-JSON response');
     }
     if(!res.ok||json.error) throw new Error(json.error||'Server error');
-    const settlementNote=data.require_settlement==='true'
-      ? ' Settlement split enabled (require_settlement=true).'
-      : ' No settlement split (require_settlement=false).';
+    const settlementNote=data.settlement_split==='true'
+      ? ' require_settlement=true with settlements[] split.'
+      : ' require_settlement=true (no settlements[] split).';
     const cpReq=json.cp_invoice_request?('<details style="margin-top:12px;text-align:left"><summary style="cursor:pointer;color:#f07a3a;font-weight:700">CapitalPay invoice request body (POST /invoice/create)</summary><pre style="margin-top:8px;padding:10px;background:#0a0c10;border:1px solid #252b38;border-radius:8px;overflow:auto;max-height:280px;font-size:11px;color:#f07a3a;white-space:pre-wrap">'+JSON.stringify(json.cp_invoice_request,null,2)+'</pre></details>'):'';
     const cpForm=json.cp_checkout_params?('<details style="margin-top:8px;text-align:left"><summary style="cursor:pointer;color:#f07a3a;font-weight:700">Checkout page form params (POST PaymentAPI)</summary><pre style="margin-top:8px;padding:10px;background:#0a0c10;border:1px solid #252b38;border-radius:8px;overflow:auto;max-height:220px;font-size:11px;color:#f07a3a;white-space:pre-wrap">'+JSON.stringify(json.cp_checkout_params,null,2)+'</pre></details>'):'';
     if(json.checkout_url){
@@ -1942,9 +1943,10 @@ def log_checkout_request():
     print(f"  Customer   : {data.get('name', '')} | {data.get('msisdn', '')} | {data.get('email', '')}")
     print(f"  Bill ref   : {data.get('bill_ref', '')}")
     print(f"  Amount     : {data.get('amount', '')} TZS")
-    require_settlement = str(data.get("require_settlement", "false")).lower() in {"true", "1", "yes"}
-    print(f"  Settlement : require_settlement={'true' if require_settlement else 'false'}")
-    if require_settlement:
+    settlement_split = str(data.get("settlement_split", "false")).lower() in {"true", "1", "yes"}
+    print("  Settlement : require_settlement=true (always)")
+    print(f"  Split      : settlements[]={'yes' if settlement_split else 'no'}")
+    if settlement_split:
         print(f"  Settle acct : {data.get('settlement_account_number', '')}")
         print(f"  Settle desc : {data.get('settlement_desc', '')}")
         print(f"  Settle value: {data.get('settlement_value', '') or data.get('amount', '')} TZS")

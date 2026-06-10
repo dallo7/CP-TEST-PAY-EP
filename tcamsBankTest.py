@@ -401,18 +401,28 @@ HTML = """
         <label>Description</label>
         <input name="desc" type="text" placeholder="Payment description" required/>
       </div>
-      <div class="section-title">Settlement Details</div>
+      <div class="section-title">Settlement</div>
       <div class="field">
-        <label>Settlement Account Number</label>
-        <input name="settlement_account_number" type="text" placeholder="Optional settlement account number"/>
+        <label>Settlement split (settlements[])</label>
+        <select name="settlement_split" id="settlementSplit">
+          <option value="false">No — require_settlement true only</option>
+          <option value="true" selected>Yes — include settlements[]</option>
+        </select>
+        <div class="hint">Invoice items always send <code>require_settlement: "true"</code>. Enable split to also send a <code>settlements[]</code> array.</div>
       </div>
-      <div class="field">
-        <label>Settlement Description</label>
-        <input name="settlement_desc" type="text" placeholder="Optional settlement description"/>
-      </div>
-      <div class="field">
-        <label>Settlement Value</label>
-        <input name="settlement_value" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full amount"/>
+      <div id="settlementPanel">
+        <div class="field">
+          <label>Settlement Account Number *</label>
+          <input name="settlement_account_number" id="settlementAccount" type="text" placeholder="Partner / beneficiary account number" required/>
+        </div>
+        <div class="field">
+          <label>Settlement Description *</label>
+          <input name="settlement_desc" id="settlementDesc" type="text" placeholder="Settlement description" required/>
+        </div>
+        <div class="field">
+          <label>Settlement Value</label>
+          <input name="settlement_value" id="settlementValue" type="number" step="0.01" min="0.01" placeholder="Leave blank to use full amount"/>
+        </div>
       </div>
       <div class="field">
         <label>Callback URL (on success)</label>
@@ -436,20 +446,59 @@ const btn = document.getElementById('submitBtn');
 const status = document.getElementById('statusBox');
 const wrap = document.getElementById('iframeWrap');
 const frame = document.getElementById('checkoutFrame');
+const settlementSplit = document.getElementById('settlementSplit');
+const settlementPanel = document.getElementById('settlementPanel');
+const settlementAccount = document.getElementById('settlementAccount');
+const settlementDesc = document.getElementById('settlementDesc');
+const settlementValue = document.getElementById('settlementValue');
+const settlementFields = [settlementAccount, settlementDesc, settlementValue];
 
 function setStatus(msg, type) {
   status.className = `status show ${type}`;
   status.innerHTML = msg;
 }
 
+function syncSettlementPanel() {
+  const enabled = settlementSplit.value === 'true';
+  settlementPanel.style.display = enabled ? 'block' : 'none';
+  settlementFields.forEach((field) => {
+    field.disabled = !enabled;
+    field.required = false;
+  });
+  if (enabled) {
+    settlementAccount.required = true;
+    settlementDesc.required = true;
+  } else {
+    settlementFields.forEach((field) => { field.value = ''; });
+  }
+}
+
+settlementSplit.addEventListener('change', syncSettlementPanel);
+syncSettlementPanel();
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (settlementSplit.value === 'true' && (!settlementAccount.value.trim() || !settlementDesc.value.trim())) {
+    setStatus('Settlement split is enabled — enter settlement account number and description.', 'error');
+    return;
+  }
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Creating Invoice...';
   setStatus('Generating token and creating invoice. Please wait...', 'info');
   wrap.style.display = 'none';
 
+  const splitOn = settlementSplit.value === 'true';
   const data = Object.fromEntries(new FormData(form).entries());
+  data.require_settlement = 'true';
+  data.settlement_split = splitOn ? 'true' : 'false';
+  delete data.settlement_account_number;
+  delete data.settlement_desc;
+  delete data.settlement_value;
+  if (splitOn) {
+    data.settlement_account_number = settlementAccount.value.trim();
+    data.settlement_desc = settlementDesc.value.trim();
+    if (settlementValue.value.trim()) data.settlement_value = settlementValue.value.trim();
+  }
 
   try {
     const res = await fetch('/checkout', {
@@ -537,16 +586,19 @@ def checkout():
     settlement_account_number = (data.get("settlement_account_number") or "").strip()
     settlement_desc = (data.get("settlement_desc") or "").strip()
     settlement_value = (data.get("settlement_value") or "").strip()
-    require_settlement_raw = str(data.get("require_settlement", "false")).strip().lower()
-    require_settlement = require_settlement_raw in {"true", "1", "yes"}
+    settlement_split = str(data.get("settlement_split", "false")).strip().lower() in {
+        "true",
+        "1",
+        "yes",
+    }
 
     account_id_str = str(ACCOUNT_ID)
     amount_str = f"{float(amount):.2f}"
-    if require_settlement and not (settlement_account_number and settlement_desc):
+    if settlement_split and not (settlement_account_number and settlement_desc):
         return jsonify(
             {
                 "error": (
-                    "require_settlement is true — settlement account number and "
+                    "Settlement split is enabled — settlement account number and "
                     "settlement description are required."
                 )
             }
@@ -558,9 +610,9 @@ def checkout():
         "item_ref": bill_ref,
         "price": amount_str,
         "quantity": "1",
-        "require_settlement": "true" if require_settlement else "false",
+        "require_settlement": "true",
     }
-    if require_settlement:
+    if settlement_split:
         settlement_value_str = f"{float(settlement_value or amount_str):.2f}"
         invoice_item["settlements"] = [
             {
