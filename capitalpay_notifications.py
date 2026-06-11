@@ -475,6 +475,13 @@ def get_notifications(limit: int = 50) -> list[dict[str, Any]]:
     return events
 
 
+def clear_notifications():
+    with get_db() as db:
+        db.execute("DELETE FROM notifications")
+        db.execute("DELETE FROM observed_ips")
+        db.execute("DELETE FROM capitalpay_ips")
+
+
 def inject_test():
     now = utc_now()
     payload = {

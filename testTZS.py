@@ -925,6 +925,7 @@ def monitor_layout():
                     style={"width": "170px", "fontSize": "12px"},
                 ),
                 action_btn("Inject test event", "btn-test-event", ACC2),
+                action_btn("Clear all", "btn-clear-notif", RED),
             ),
             html.Div(id="cp-outbound-panel"),
             html.Div(id="m-feed"),
@@ -1712,6 +1713,7 @@ def switch_tab(_, __, current):
     Output("ip-table", "children"),
     Output("ip-count", "children"),
     Input("interval", "n_intervals"),
+    Input("btn-clear-notif", "n_clicks"),
     Input("btn-test-event", "n_clicks"),
     State("m-search", "value"),
     State("m-status", "value"),
@@ -1719,9 +1721,9 @@ def switch_tab(_, __, current):
     State("m-quality", "value"),
     prevent_initial_call=False,
 )
-def refresh_monitor(_, tst, search, status_f, hash_f, quality_f):
+def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
     try:
-        return _refresh_monitor_impl(_, tst, search, status_f, hash_f, quality_f)
+        return _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f)
     except Exception as exc:
         print(f"[MONITOR] refresh_monitor failed: {exc}")
         return (
@@ -1736,11 +1738,14 @@ def refresh_monitor(_, tst, search, status_f, hash_f, quality_f):
         )
 
 
-def _refresh_monitor_impl(_, tst, search, status_f, hash_f, quality_f):
+def _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f):
     ctx = callback_context
     if ctx.triggered:
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger_id == "btn-test-event":
+        if trigger_id == "btn-clear-notif":
+            notifications.clear_notifications()
+            print("[MONITOR] Cleared notification events and observed IPs")
+        elif trigger_id == "btn-test-event":
             event = notifications.inject_test()
             print(f"[MONITOR] Injected test event paid={event['status'] == 'settled'} ip={event['ip_address']}")
 
@@ -1789,10 +1794,11 @@ def _refresh_monitor_impl(_, tst, search, status_f, hash_f, quality_f):
 @app.callback(
     Output("cp-outbound-panel", "children"),
     Input("interval", "n_intervals"),
+    Input("btn-clear-notif", "n_clicks"),
     Input("btn-test-event", "n_clicks"),
     prevent_initial_call=False,
 )
-def refresh_cp_outbound_panel(_, __):
+def refresh_cp_outbound_panel(_, __, ___):
     try:
         return cp_outbound_panel()
     except Exception as exc:
@@ -2248,6 +2254,12 @@ def api_last_cp_outbound():
 @server.route("/api/notifications", methods=["GET"])
 def api_notifications():
     return jsonify({"events": notifications.get_notifications(500)})
+
+
+@server.route("/api/notifications", methods=["DELETE"])
+def api_clear_notifications():
+    notifications.clear_notifications()
+    return jsonify({"cleared": True})
 
 
 @server.route("/api/ips", methods=["GET"])
