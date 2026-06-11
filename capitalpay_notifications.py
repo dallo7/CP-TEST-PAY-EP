@@ -47,6 +47,7 @@ def get_db():
 def init_db(conn=None):
     should_close = conn is None
     conn = conn or sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute(
             """
@@ -141,7 +142,8 @@ def _amount(value: Any) -> str:
 
 
 def _migrate_observed_ips(conn):
-    count = conn.execute("SELECT COUNT(*) AS c FROM observed_ips").fetchone()["c"]
+    count_row = conn.execute("SELECT COUNT(*) FROM observed_ips").fetchone()
+    count = count_row[0] if count_row else 0
     if count:
         return
     legacy_rows = conn.execute(
