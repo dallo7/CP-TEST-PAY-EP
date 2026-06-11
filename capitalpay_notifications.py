@@ -10,7 +10,22 @@ from typing import Any
 
 
 DB_PATH = os.environ.get("CAPITALPAY_NOTIFICATION_DB", "capitalpay_notifications.sqlite3")
-ONE_TIME_RESET_KEY = "dashboard_one_time_reset_v1"
+
+IP_ROLE_CAPITALPAY = "capitalpay_ipn"
+IP_ROLE_CLIENT = "client_browser"
+
+IP_ROLE_LABELS = {
+    IP_ROLE_CAPITALPAY: {
+        "title": "CapitalPay IPN server",
+        "direction": "CapitalPay server → your /notify",
+        "endpoint": "/notify",
+    },
+    IP_ROLE_CLIENT: {
+        "title": "Client browser",
+        "direction": "Payer device → your /callback",
+        "endpoint": "/callback",
+    },
+}
 
 
 def utc_now() -> str:
@@ -76,12 +91,18 @@ def init_db(conn=None):
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS app_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS observed_ips (
+                ip_address TEXT NOT NULL,
+                ip_role TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                hit_count INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (ip_address, ip_role)
             )
             """
         )
+        _migrate_observed_ips(conn)
         conn.commit()
     finally:
         if should_close:
@@ -117,6 +138,60 @@ def _amount(value: Any) -> str:
         return f"{Decimal(str(value).replace(',', '')):.2f}"
     except (InvalidOperation, ValueError):
         return "0.00"
+
+
+def _migrate_observed_ips(conn):
+    count = conn.execute("SELECT COUNT(*) AS c FROM observed_ips").fetchone()["c"]
+    if count:
+        return
+    legacy_rows = conn.execute(
+        "SELECT ip_address, first_seen, last_seen, hit_count FROM capitalpay_ips"
+    ).fetchall()
+    for row in legacy_rows:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO observed_ips (
+                ip_address, ip_role, endpoint, first_seen, last_seen, hit_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["ip_address"],
+                IP_ROLE_CAPITALPAY,
+                "/notify",
+                row["first_seen"],
+                row["last_seen"],
+                row["hit_count"],
+            ),
+        )
+
+
+def record_observed_ip(ip_address: str, ip_role: str, endpoint: str, seen_at: str | None = None):
+    seen_at = seen_at or utc_now()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO observed_ips (ip_address, ip_role, endpoint, first_seen, last_seen, hit_count)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(ip_address, ip_role) DO UPDATE SET
+                last_seen = excluded.last_seen,
+                hit_count = observed_ips.hit_count + 1,
+                endpoint = excluded.endpoint
+            """,
+            (ip_address, ip_role, endpoint, seen_at, seen_at),
+        )
+
+
+def get_observed_ips() -> list[dict[str, Any]]:
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT ip_address, ip_role, endpoint, first_seen, last_seen, hit_count
+            FROM observed_ips
+            ORDER BY ip_role ASC, hit_count DESC, last_seen DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def _ensure_notification_columns(conn):
@@ -338,17 +413,9 @@ def record_notification(request, api_secret: str, allowed_ips: set[str] | None =
     refs_json = json.dumps(event["payment_references"], sort_keys=True)
     issues_json = json.dumps(quality["issues"], sort_keys=True)
 
+    record_observed_ip(ip_address, IP_ROLE_CAPITALPAY, "/notify", event["received_at"])
+
     with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO capitalpay_ips (ip_address, first_seen, last_seen, hit_count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(ip_address) DO UPDATE SET
-                last_seen = excluded.last_seen,
-                hit_count = capitalpay_ips.hit_count + 1
-            """,
-            (ip_address, event["received_at"], event["received_at"]),
-        )
         db.execute(
             """
             INSERT INTO notifications (
@@ -406,30 +473,6 @@ def get_notifications(limit: int = 50) -> list[dict[str, Any]]:
         event["payment_references"] = json.loads(event.pop("payment_references_json") or "[]")
         events.append(event)
     return events
-
-
-def clear_notifications():
-    with get_db() as db:
-        db.execute("DELETE FROM notifications")
-        db.execute("DELETE FROM capitalpay_ips")
-
-
-def one_time_startup_reset() -> bool:
-    """Clear stored notifications once, then keep all future traffic permanently."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT value FROM app_meta WHERE key = ?",
-            (ONE_TIME_RESET_KEY,),
-        ).fetchone()
-        if row:
-            return False
-        db.execute("DELETE FROM notifications")
-        db.execute("DELETE FROM capitalpay_ips")
-        db.execute(
-            "INSERT INTO app_meta (key, value) VALUES (?, ?)",
-            (ONE_TIME_RESET_KEY, utc_now()),
-        )
-    return True
 
 
 def inject_test():

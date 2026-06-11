@@ -216,6 +216,13 @@ def default_callback_url():
 def _record_callback_event(payload, raw_body):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     source_ip = notifications.get_client_ip(request)
+    notifications.record_observed_ip(
+        source_ip,
+        notifications.IP_ROLE_CLIENT,
+        "/callback",
+        now,
+    )
+    quality = notifications.assess_payload_quality(payload, raw_body)
     status = _callback_status(payload)
     invoice_number = _first_payload_value(payload, "invoice_number", "invoice_no", "invoice", "payment_ref")
     client_ref = _first_payload_value(payload, "client_invoice_ref", "bill_ref_number", "billRefNumber", "reference")
@@ -238,6 +245,7 @@ def _record_callback_event(payload, raw_body):
     payload_json = json.dumps(payload, sort_keys=True)
     headers_json = json.dumps(dict(request.headers), sort_keys=True)
 
+    issues_json = json.dumps(quality["issues"], sort_keys=True)
     with notifications.get_db() as db:
         db.execute(
             """
@@ -246,9 +254,9 @@ def _record_callback_event(payload, raw_body):
                 status, valid_hash, hash_value, expected_hash, invoice_number,
                 client_invoice_ref, phone_number, payment_date, payment_channel,
                 currency, invoice_amount, last_payment_amount, amount_paid,
-                payment_references_json
+                payment_references_json, payload_quality, ip_allowed, quality_issues_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now,
@@ -271,6 +279,9 @@ def _record_callback_event(payload, raw_body):
                 amount_paid,
                 amount_paid,
                 refs_json,
+                quality["quality"],
+                1,
+                issues_json,
             ),
         )
 
@@ -484,20 +495,6 @@ def _install_verbose_capitalpay_logging():
 
 
 _install_verbose_capitalpay_logging()
-
-
-def _run_one_time_startup_reset():
-    try:
-        if notifications.one_time_startup_reset():
-            print(
-                "[METRICS] One-time dashboard reset complete — "
-                "all future /notify traffic will be stored permanently"
-            )
-    except Exception as exc:
-        print(f"[METRICS] One-time reset skipped: {exc}")
-
-
-_run_one_time_startup_reset()
 
 
 # Gunicorn uses this variable on Render: gunicorn testTZS:server
@@ -928,7 +925,6 @@ def monitor_layout():
                     style={"width": "170px", "fontSize": "12px"},
                 ),
                 action_btn("Inject test event", "btn-test-event", ACC2),
-                action_btn("Clear all", "btn-clear-notif", RED),
             ),
             html.Div(id="cp-outbound-panel"),
             html.Div(id="m-feed"),
@@ -944,29 +940,21 @@ def monitor_layout():
                         },
                         children=[
                             html.H2(
-                                "CapitalPay Server IPs",
+                                "IP Traffic Directory",
                                 style={
                                     "fontFamily": "DM Serif Display,serif",
                                     "fontSize": "17px",
                                     "color": TEXT,
                                 },
                             ),
-                            html.Span("0 IPs observed", id="ip-count", style={"fontSize": "12px", "color": MUTED}),
+                            html.Span("0 IPs tracked", id="ip-count", style={"fontSize": "12px", "color": MUTED}),
                             html.Span(
-                                "Confirm with CapitalPay support",
+                                "Persisted permanently — no auto-clear",
                                 style={"marginLeft": "auto", "fontSize": "11px", "color": MUTED},
                             ),
                         ],
                     ),
-                    html.Div(
-                        id="ip-table",
-                        style={
-                            "background": SURF,
-                            "border": f"1px solid {BORD}",
-                            "borderRadius": "13px",
-                            "overflow": "hidden",
-                        },
-                    ),
+                    html.Div(id="ip-table"),
                 ],
             ),
         ]
@@ -1397,7 +1385,11 @@ def event_feed(events):
     return html.Div(cards)
 
 
-def ip_table(ip_data):
+def _ip_role_section(ip_role: str, rows: list[dict], accent: str):
+    meta = notifications.IP_ROLE_LABELS.get(ip_role, {})
+    title = meta.get("title", ip_role)
+    direction = meta.get("direction", "")
+    endpoint = meta.get("endpoint", "-")
     th = {
         "textAlign": "left",
         "padding": "8px 12px",
@@ -1408,13 +1400,14 @@ def ip_table(ip_data):
         "background": "#1a1f2b",
         "borderBottom": f"1px solid {BORD}",
     }
-    rows = [
+    body_rows = [
         html.Tr(
             [
                 html.Td(
                     r["ip_address"],
-                    style={"padding": "8px 12px", "fontFamily": "monospace", "color": ACC2, "fontSize": "12px"},
+                    style={"padding": "8px 12px", "fontFamily": "monospace", "color": accent, "fontSize": "12px"},
                 ),
+                html.Td(r["endpoint"], style={"padding": "8px 12px", "color": TEXT, "fontSize": "12px"}),
                 html.Td(r["first_seen"], style={"padding": "8px 12px", "color": TEXT, "fontSize": "12px"}),
                 html.Td(r["last_seen"], style={"padding": "8px 12px", "color": TEXT, "fontSize": "12px"}),
                 html.Td(
@@ -1429,32 +1422,94 @@ def ip_table(ip_data):
                 ),
             ]
         )
-        for r in ip_data
+        for r in rows
     ] or [
         html.Tr(
             html.Td(
-                "No POST requests received yet",
-                colSpan=4,
-                style={"textAlign": "center", "padding": "22px", "color": MUTED, "fontSize": "12px"},
+                "No traffic recorded yet",
+                colSpan=5,
+                style={"textAlign": "center", "padding": "18px", "color": MUTED, "fontSize": "12px"},
             )
         )
     ]
 
-    return html.Table(
-        style={"width": "100%", "borderCollapse": "collapse"},
+    return html.Div(
+        style={
+            "background": SURF,
+            "border": f"1px solid {BORD}",
+            "borderRadius": "13px",
+            "overflow": "hidden",
+            "marginBottom": "14px",
+        },
         children=[
-            html.Thead(
-                html.Tr(
-                    [
-                        html.Th("IP Address", style=th),
-                        html.Th("First seen (UTC)", style=th),
-                        html.Th("Last seen (UTC)", style=th),
-                        html.Th("Hits", style={**th, "textAlign": "center"}),
-                    ]
-                )
+            html.Div(
+                style={
+                    "padding": "12px 16px",
+                    "borderBottom": f"1px solid {BORD}",
+                    "background": _rgba(accent, 0.08),
+                },
+                children=[
+                    html.Div(
+                        style={"display": "flex", "alignItems": "center", "gap": "10px", "flexWrap": "wrap"},
+                        children=[
+                            badge(title, accent),
+                            html.Span(direction, style={"fontSize": "12px", "color": TEXT}),
+                            html.Span(
+                                endpoint,
+                                style={
+                                    "marginLeft": "auto",
+                                    "fontFamily": "monospace",
+                                    "fontSize": "11px",
+                                    "color": accent,
+                                },
+                            ),
+                        ],
+                    ),
+                ],
             ),
-            html.Tbody(rows),
+            html.Table(
+                style={"width": "100%", "borderCollapse": "collapse"},
+                children=[
+                    html.Thead(
+                        html.Tr(
+                            [
+                                html.Th("IP address", style=th),
+                                html.Th("Endpoint", style=th),
+                                html.Th("First seen (UTC)", style=th),
+                                html.Th("Last seen (UTC)", style=th),
+                                html.Th("Hits", style={**th, "textAlign": "center"}),
+                            ]
+                        )
+                    ),
+                    html.Tbody(body_rows),
+                ],
+            ),
         ],
+    )
+
+
+def ip_directory_panel(ip_data):
+    grouped: dict[str, list[dict]] = {
+        notifications.IP_ROLE_CAPITALPAY: [],
+        notifications.IP_ROLE_CLIENT: [],
+    }
+    for row in ip_data:
+        role = row.get("ip_role") or notifications.IP_ROLE_CAPITALPAY
+        grouped.setdefault(role, []).append(row)
+
+    return html.Div(
+        [
+            _ip_role_section(
+                notifications.IP_ROLE_CAPITALPAY,
+                grouped.get(notifications.IP_ROLE_CAPITALPAY, []),
+                IPN_BLUE,
+            ),
+            _ip_role_section(
+                notifications.IP_ROLE_CLIENT,
+                grouped.get(notifications.IP_ROLE_CLIENT, []),
+                GREEN,
+            ),
+        ]
     )
 
 
@@ -1657,7 +1712,6 @@ def switch_tab(_, __, current):
     Output("ip-table", "children"),
     Output("ip-count", "children"),
     Input("interval", "n_intervals"),
-    Input("btn-clear-notif", "n_clicks"),
     Input("btn-test-event", "n_clicks"),
     State("m-search", "value"),
     State("m-status", "value"),
@@ -1665,9 +1719,9 @@ def switch_tab(_, __, current):
     State("m-quality", "value"),
     prevent_initial_call=False,
 )
-def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
+def refresh_monitor(_, tst, search, status_f, hash_f, quality_f):
     try:
-        return _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f)
+        return _refresh_monitor_impl(_, tst, search, status_f, hash_f, quality_f)
     except Exception as exc:
         print(f"[MONITOR] refresh_monitor failed: {exc}")
         return (
@@ -1677,19 +1731,16 @@ def refresh_monitor(_, clr, tst, search, status_f, hash_f, quality_f):
             "0",
             "0.00",
             html.Div(f"Monitor error: {exc}", style={"color": RED, "padding": "12px"}),
-            ip_table([]),
-            "0 IPs observed",
+            ip_directory_panel([]),
+            "0 IPs tracked",
         )
 
 
-def _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f):
+def _refresh_monitor_impl(_, tst, search, status_f, hash_f, quality_f):
     ctx = callback_context
     if ctx.triggered:
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-        if trigger_id == "btn-clear-notif":
-            notifications.clear_notifications()
-            print("[MONITOR] Cleared notification events and observed IPs")
-        elif trigger_id == "btn-test-event":
+        if trigger_id == "btn-test-event":
             event = notifications.inject_test()
             print(f"[MONITOR] Injected test event paid={event['status'] == 'settled'} ip={event['ip_address']}")
 
@@ -1721,14 +1772,7 @@ def _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f):
             or query in (e.get("ip_address") or "").lower()
         ]
 
-    with notifications.get_db() as db:
-        ips = [
-            dict(r)
-            for r in db.execute(
-                "SELECT ip_address, first_seen, last_seen, hit_count "
-                "FROM capitalpay_ips ORDER BY hit_count DESC, last_seen DESC"
-            ).fetchall()
-        ]
+    ips = notifications.get_observed_ips()
 
     return (
         str(len(events)),
@@ -1737,19 +1781,18 @@ def _refresh_monitor_impl(_, clr, tst, search, status_f, hash_f, quality_f):
         str(len(settled)),
         f"{paid:,.2f}",
         event_feed(filtered),
-        ip_table(ips),
-        f"{len(ips)} IP{'s' if len(ips) != 1 else ''} observed",
+        ip_directory_panel(ips),
+        f"{len(ips)} IP{'s' if len(ips) != 1 else ''} tracked",
     )
 
 
 @app.callback(
     Output("cp-outbound-panel", "children"),
     Input("interval", "n_intervals"),
-    Input("btn-clear-notif", "n_clicks"),
     Input("btn-test-event", "n_clicks"),
     prevent_initial_call=False,
 )
-def refresh_cp_outbound_panel(_, __, ___):
+def refresh_cp_outbound_panel(_, __):
     try:
         return cp_outbound_panel()
     except Exception as exc:
@@ -2207,20 +2250,9 @@ def api_notifications():
     return jsonify({"events": notifications.get_notifications(500)})
 
 
-@server.route("/api/notifications", methods=["DELETE"])
-def api_clear():
-    notifications.clear_notifications()
-    return jsonify({"cleared": True})
-
-
 @server.route("/api/ips", methods=["GET"])
 def api_ips():
-    with notifications.get_db() as db:
-        rows = db.execute(
-            "SELECT ip_address, first_seen, last_seen, hit_count "
-            "FROM capitalpay_ips ORDER BY hit_count DESC, last_seen DESC"
-        ).fetchall()
-    return jsonify({"ips": [dict(r) for r in rows]})
+    return jsonify({"ips": notifications.get_observed_ips()})
 
 
 @server.route("/api/logs", methods=["GET"])
